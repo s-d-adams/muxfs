@@ -1,0 +1,54 @@
+The Multiplexed Filesystem  
+==========================
+
+IMPORTANT
+---------
+DO NOT USE MUXFS YET.  MUXFS IS CURRENTLY IN DEVELOPMENT AND IS NOT READY FOR
+PRODUCTION USE.  IF AND WHEN MUXFS BECOMES STABLE IT WILL BE INTENDED FOR
+LONG-TERM DATA STORAGE, HOWEVER USING MUXFS IN ITS CURRENT FORM WILL LIKELY
+LEAD TO LOSS OF DATA.
+
+Introduction
+------------
+muxfs is an experimental mirroring and checksumming filesystem layer for
+OpenBSD.  It mirrors the filesystem tree at the mount point to a series of
+user-selected directories, and employs a checksum database to validate and
+restore files in realtime.
+
+Installation
+------------
+	# make
+	# make install
+
+Usage
+-----
+1. Create a directory array.  With empty, non-overlapping directories:
+	# newfs_muxfs -d /path/to/dir/1 -d /path/to/dir/2 ...
+2. Mount the array.
+	# mount_muxfs /path/to/dir/1 /path/to/dir/2 ... /path/to/mount/point
+3. Edit the tree at the mount point.
+4. Unmount the array.
+	# umount /path/to/mount/point
+
+Recommendations
+---------------
+* Use root directories of freshly formatted filesystems as the directories in
+  the array in order to minimize the size of the checksum databases.
+
+Contributing
+------------
+Please send bug, usability, and performance reports to
+<s.d.adams.software@gmail.com>.  Patches are welcome provided that the
+copyrights are assigned to Stephen D Adams.
+
+If you want to read the code then I advise that you first look at GLOSSARY,
+then muxfs.h, then progress to the rest of the code.  If you want to test a
+patch then I advise that you edit Makefile commenting out the 'unity' target
+and uncommenting the 'incremental' target; this may increase build time and
+binary size but will produce clearer compiler error messages.  To run
+mount_muxfs under a debugger you will need to uncomment either the '-f' line or
+the '-odebug' line from mount_muxfs.c (see fuse_parse_cmdline(3) for details).
+
+Author
+------
+Stephen D Adams <s.d.adams.software@gmail.com>
