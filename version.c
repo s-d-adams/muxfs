@@ -20,6 +20,6 @@
 struct muxfs_version
 muxfs_program_version = {
 	.number   = 0,
-	.revision = 0,
+	.revision = 1,
 	.flavor   = VF_CURRENT
 };

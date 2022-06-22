@@ -28,7 +28,11 @@
 #include "conf.c"
 #include "desc.c"
 #include "dev.c"
+#if MUXFS_DS == 1
+#include "ds.c"
+#else
 #include "ds_malloc.c"
+#endif
 #include "ops.c"
 #include "state.c"
 #include "util.c"

@@ -126,11 +126,11 @@ struct muxfs_meta_header {
 	uint64_t	flags;
 	uint64_t	eno;
 };
-struct muxfs_meta_buffer {
+struct muxfs_meta {
 	struct	muxfs_meta_header header;
 	/*
 	 * When stack-allocated this buffer guarantees enough space for the
-	 * sums.  If the content of the metadata file is loaded, then cast via
+	 * sums.  If the content of the metadata file is loaded and cast via
 	 * pointer to this struct then care must be taken to avoid reading
 	 * beyond the actual bounds of the metadata entry.  Similarly the whole
 	 * of this buffer should not necessarily be written to the metadata
@@ -142,10 +142,9 @@ struct muxfs_meta_buffer {
 };
 MUXFS int muxfs_meta_size(size_t *, dind);
 MUXFS int muxfs_meta_size_raw(size_t *, enum muxfs_chk_alg_type);
-MUXFS int muxfs_meta_read(struct muxfs_meta_buffer *, dind, uint64_t);
-MUXFS int muxfs_meta_write(const struct muxfs_meta_buffer *, dind, uint64_t);
-MUXFS int muxfs_meta_write_fd(int, const struct muxfs_meta_buffer *, uint64_t,
-    size_t);
+MUXFS int muxfs_meta_read(struct muxfs_meta *, dind, uint64_t);
+MUXFS int muxfs_meta_write(const struct muxfs_meta *, dind, uint64_t);
+MUXFS int muxfs_meta_write_fd(int, const struct muxfs_meta *, uint64_t, size_t);
 
 enum muxfs_assign_flag {
 	AF_ASSIGNED = 0x1
@@ -190,6 +189,12 @@ MUXFS void muxfs_desc_chk_meta(uint8_t *, const struct muxfs_desc *,
     enum muxfs_chk_alg_type);
 
 /* state.c */
+MUXFS int  muxfs_state_syslog_init(void);
+MUXFS int  muxfs_state_syslog_final(void);
+MUXFS void muxfs_info(const char *, ...);
+MUXFS void muxfs_warn(const char *, ...);
+MUXFS void muxfs_alert(const char *, ...);
+
 MUXFS int  muxfs_state_restore_queue_init(void);
 MUXFS void muxfs_state_restore_queue_final(void);
 MUXFS int  muxfs_state_restore_push_back(dind, const char *);
@@ -207,10 +212,10 @@ enum muxfs_cud_type {
 	MUXFS_CUD_DELETE
 };
 struct muxfs_cud {
-	enum muxfs_cud_type		 type;
-	const char			*path,
-					*fname;
-	struct muxfs_meta_buffer	 pre_mbuf;
+	enum muxfs_cud_type	 type;
+	const char		*path,
+				*fname;
+	struct muxfs_meta	 pre_meta;
 };
 struct muxfs_dir {
 	void *base;
@@ -218,10 +223,10 @@ struct muxfs_dir {
 	size_t ent_count;
 };
 MUXFS int muxfs_path_sanitize(const char **);
-MUXFS int muxfs_path_pop(char **, char *, size_t *);
+MUXFS int muxfs_path_pop(const char **, char *, size_t *);
 MUXFS int muxfs_pushdir(struct muxfs_dir *, int, const char *);
 MUXFS int muxfs_popdir(struct muxfs_dir *);
-MUXFS int muxfs_readback(dind, const char *, struct muxfs_meta_buffer *);
+MUXFS int muxfs_readback(dind, const char *, struct muxfs_meta *);
 MUXFS int muxfs_parent_readback(dind, const char *);
 MUXFS int muxfs_ancestors_meta_recompute(dind, struct muxfs_cud *);
 MUXFS int muxfs_dir_meta_recompute(struct muxfs_cud *, dind,

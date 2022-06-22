@@ -32,12 +32,33 @@
 #include "muxfs.h"
 #include "gen.h"
 
+static void
+muxfs_eids_set(void)
+{
+	struct fuse_context *fuse_ctx;
+
+	fuse_ctx = fuse_get_context();
+	if (setegid(fuse_ctx->gid))
+		exit(-1);
+	if (seteuid(fuse_ctx->uid))
+		exit(-1);
+}
+
+static void
+muxfs_eids_reset(void)
+{
+	if (seteuid(getuid()))
+		exit(-1);
+	if (setegid(getgid()))
+		exit(-1);
+}
+
 static int
 muxfs_statfs(const char *path, struct statvfs *stvfs)
 {
 	dind dev_count, i;
 	struct muxfs_dev *dev;
-	int fd;
+	int fd, err, subrc;
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -47,12 +68,20 @@ muxfs_statfs(const char *path, struct statvfs *stvfs)
 	for (i = 0; i < dev_count; ++i) {
 		if (muxfs_dev_get(&dev, i))
 			continue;
-		if ((fd = openat(dev->root_fd, path, O_RDONLY)) == -1)
+		muxfs_eids_set();
+		fd = openat(dev->root_fd, path, O_RDONLY);
+		err = errno;
+		muxfs_eids_reset();
+		if (fd == -1)
 			continue;
-		if (fstatvfs(fd, stvfs)) {
+		muxfs_eids_set();
+		subrc = fstatvfs(fd, stvfs);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
 			if (close(fd))
 				exit(-1);
-			return -errno;
+			return -err;
 		}
 		if (close(fd))
 			exit(-1);
@@ -110,7 +139,8 @@ muxfs_destroy(void *data)
 		}
 	}
 	muxfs_state_restore_queue_final();
-
+	if (muxfs_state_syslog_final())
+		exit(-1);
 	if (muxfs_dsfinal())
 		exit(-1);
 }
@@ -128,6 +158,27 @@ muxfs_fsync(const char *path, int datasync, struct fuse_file_info *ffi)
 static int
 muxfs_open(const char *path, struct fuse_file_info *ffi)
 {
+	dind dev_count, i;
+	struct muxfs_dev *dev;
+	int fd, err;
+
+	if (muxfs_path_sanitize(&path))
+		return -EIO;
+
+	if ((dev_count = muxfs_dev_count()) == 0)
+		return -EIO;
+	for (i = 0; i < dev_count; ++i) {
+		if (muxfs_dev_get(&dev, i))
+			continue;
+		muxfs_eids_set();
+		fd = openat(dev->root_fd, path, ffi->flags);
+		err = errno;
+		muxfs_eids_reset();
+		if (fd == -1)
+			return -err;
+		if (close(fd))
+			exit(-1);
+	}
 	return 0;
 }
 
@@ -188,17 +239,17 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 
 	gid_t parent_gid;
 
-	int				 rc, subrc, subfd;
-	int				 has_write;
-	uint64_t			 eno;
-	struct muxfs_desc		 desc;
-	struct muxfs_chk		 content_chk;
-	struct stat			 st;
-	ino_t				 ino;
-	struct muxfs_meta_buffer	 meta_buf;
-	struct muxfs_assign		 assign;
+	int			 rc, err, subrc, subfd;
+	int			 has_write;
+	uint64_t		 eno;
+	struct muxfs_desc	 desc;
+	struct muxfs_chk	 content_chk;
+	struct stat		 st;
+	ino_t			 ino;
+	struct muxfs_meta	 meta;
+	struct muxfs_assign	 assign;
 
-	struct muxfs_cud		 cud;
+	struct muxfs_cud	 cud;
 
 	fuse_ctx = fuse_get_context();
 
@@ -232,19 +283,27 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			goto early;
 		}
 		muxfs_chk_init(&content_chk, alg);
+		if (args->type == MUXFS_CT_SYMLINK) {
+			muxfs_chk_update(&content_chk,
+			    (uint8_t *)args->link_content,
+			    strlen(args->link_content));
+		}
 		muxfs_chk_final(desc.content_checksum, &content_chk);
 	
-		memcpy(&meta_buf.checksums[chksz],
+		memcpy(&meta.checksums[chksz],
 		    desc.content_checksum, chksz);
-		muxfs_desc_chk_meta(&meta_buf.checksums[0], &desc, alg);
-		meta_buf.header.eno = eno;
-		meta_buf.header.flags = MF_ASSIGNED;
+		muxfs_desc_chk_meta(&meta.checksums[0], &desc, alg);
+		meta.header.eno = eno;
+		meta.header.flags = MF_ASSIGNED;
 
 		switch (args->type) {
 		case MUXFS_CT_MKNOD:
 			if (S_ISREG(args->mode)) {
+				muxfs_eids_set();
 				subfd = openat(fd, args->path,
 				    O_RDWR|O_CREAT|O_EXCL, args->mode);
+				err = errno;
+				muxfs_eids_reset();
 				if (subfd != -1) {
 					if (close(subfd))
 						exit(-1);
@@ -257,43 +316,47 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			}
 			break;
 		case MUXFS_CT_MKDIR:
+			muxfs_eids_set();
 			subrc = mkdirat(fd, args->path, args->mode);
+			err = errno;
+			muxfs_eids_reset();
 			break;
 		case MUXFS_CT_SYMLINK:
+			muxfs_eids_set();
 			subrc = symlinkat(args->link_content, fd, args->path);
+			err = errno;
+			muxfs_eids_reset();
 			break;
 		default:
 			exit(-1); /* Programming error. */
 		}
 		if (subrc) {
 			if (!has_write) {
-				rc = -errno;
+				rc = -err;
 				goto early;
 			}
 			goto fail;
 		}
 
-		if ((subfd = openat(fd, args->path, O_RDONLY|O_NOFOLLOW)) == -1)
-			goto fail;
-		if (fchown(subfd, fuse_ctx->uid, -1))
-			goto fail;
-		if (fsync(subfd))
-			exit(-1);
-
-		if (fstat(subfd, &st)) {
+		if (args->type != MUXFS_CT_SYMLINK) {
+			if ((subfd = openat(fd, args->path,
+			    O_RDONLY|O_NOFOLLOW)) == -1)
+				goto fail;
+			if (fsync(subfd))
+				exit(-1);
 			if (close(subfd))
 				exit(-1);
-			goto fail;
 		}
-		if (close(subfd))
-			exit(-1);
+
+		if (fstatat(fd, args->path, &st, AT_SYMLINK_NOFOLLOW))
+			goto fail;
 		ino = st.st_ino;
 		assign = (struct muxfs_assign) {
 			.flags = AF_ASSIGNED,
 			.ino = ino
 		};
 	
-		if (muxfs_meta_write(&meta_buf, i, ino))
+		if (muxfs_meta_write(&meta, i, ino))
 			goto fail;
 		if (muxfs_assign_write(&assign, i, eno))
 			goto fail;
@@ -303,7 +366,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 		if (fsync(dev->assign_fd))
 			exit(-1);
 	
-		if (muxfs_readback(i, args->path, &meta_buf))
+		if (muxfs_readback(i, args->path, &meta))
 			goto fail;
 
 		cud.type = MUXFS_CUD_CREATE;
@@ -389,19 +452,19 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 
 	uint64_t return_eno;
 
-	int				 rc, subrc;
-	int				 has_write;
-	struct stat			 prewr_st;
-	ino_t				 prewr_ino;
-	struct muxfs_meta_buffer	 prewr_meta_buf;
-	uint64_t			 prewr_eno;
-	struct muxfs_desc		 prewr_desc;
-	uint8_t				 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
-	struct muxfs_meta_buffer	 wr_meta_buf;
-	struct muxfs_assign		 wr_assign;
-	char				 postwr_ppath[PATH_MAX];
-	int				 postwr_pfd;
-	struct stat			 postwr_st;
+	int			 rc, err, subrc;
+	int			 has_write;
+	struct stat		 prewr_st;
+	ino_t			 prewr_ino;
+	struct muxfs_meta	 prewr_meta;
+	uint64_t		 prewr_eno;
+	struct muxfs_desc	 prewr_desc;
+	uint8_t			 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
+	struct muxfs_meta	 wr_meta;
+	struct muxfs_assign	 wr_assign;
+	char			 postwr_ppath[PATH_MAX];
+	int			 postwr_pfd;
+	struct stat		 postwr_st;
 
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
@@ -418,32 +481,42 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 		alg = dev->conf.chk_alg_type;
 		chksz = muxfs_chk_size(alg);
 
-		if (fstatat(fd, path, &prewr_st, AT_SYMLINK_NOFOLLOW)) {
+		muxfs_eids_set();
+		subrc = fstatat(fd, path, &prewr_st, AT_SYMLINK_NOFOLLOW);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
 			if (has_write)
 				goto fail;
-			rc = -errno;
+			rc = -err;
 			goto early;
 		}
 		prewr_ino = prewr_st.st_ino;
-		if (muxfs_meta_read(&prewr_meta_buf, i, prewr_ino))
+		if (muxfs_meta_read(&prewr_meta, i, prewr_ino))
 			goto fail;
-		prewr_eno = prewr_meta_buf.header.eno;
+		prewr_eno = prewr_meta.header.eno;
 		if (muxfs_desc_init_from_stat(&prewr_desc, &prewr_st,
 		    prewr_eno))
 			goto fail;
 		if (muxfs_desc_chk_node_content(&prewr_desc, i, path))
 			goto fail;
 		muxfs_desc_chk_meta(prewr_meta_chk_buf, &prewr_desc, alg);
-		if (bcmp(prewr_meta_chk_buf, &prewr_meta_buf.checksums[0],
+		if (bcmp(prewr_meta_chk_buf, &prewr_meta.checksums[0],
 		    chksz) != 0)
 			goto fail;
 
 		switch (type) {
 		case MUXFS_DT_UNLINK:
+			muxfs_eids_set();
 			subrc = unlinkat(fd, path, 0);
+			err = errno;
+			muxfs_eids_reset();
 			break;
 		case MUXFS_DT_RMDIR:
+			muxfs_eids_set();
 			subrc = unlinkat(fd, path, AT_REMOVEDIR);
+			err = errno;
+			muxfs_eids_reset();
 			break;
 		default:
 			exit(-1); /* Programming error. */
@@ -451,7 +524,7 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 		if (subrc) {
 			if (has_write)
 				goto fail;
-			rc = -errno;
+			rc = -err;
 			goto early;
 		}
 
@@ -474,9 +547,9 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 		if (errno != ENOENT)
 			goto fail;
 
-		memset(&wr_meta_buf, 0, sizeof(wr_meta_buf));
+		memset(&wr_meta, 0, sizeof(wr_meta));
 		memset(&wr_assign  , 0, sizeof(wr_assign  ));
-		if (muxfs_meta_write(&wr_meta_buf, i, prewr_ino))
+		if (muxfs_meta_write(&wr_meta, i, prewr_ino))
 			goto fail;
 		if (muxfs_assign_write(&wr_assign, i, prewr_eno))
 			goto fail;
@@ -546,7 +619,8 @@ struct muxfs_op_read_args {
 };
 
 static int
-muxfs_getattr_inner(struct stat *st_out, struct stat *st, uint64_t eno)
+muxfs_getattr_inner(struct stat *st_out, struct stat *st, uint64_t eno,
+    int *err)
 {
 	size_t sz;
 
@@ -562,8 +636,8 @@ muxfs_getattr_inner(struct stat *st_out, struct stat *st, uint64_t eno)
 
 static int
 muxfs_read_inner(int root_fd, struct muxfs_op_read_args *args, struct stat *st,
-    enum muxfs_chk_alg_type alg, size_t chksz,
-    struct muxfs_meta_buffer *meta_buf, ssize_t *rdsz_out)
+    enum muxfs_chk_alg_type alg, size_t chksz, struct muxfs_meta *meta,
+    ssize_t *rdsz_out, int *err)
 {
 	int fd, rc;
 	size_t fsz;
@@ -574,49 +648,57 @@ muxfs_read_inner(int root_fd, struct muxfs_op_read_args *args, struct stat *st,
 
 	rc = MUXFS_EINT;
 
+	muxfs_eids_set();
+	fd = openat(root_fd, args->path, O_RDONLY);
+	*err = errno;
+	muxfs_eids_reset();
+	if (fd == -1) {
+		rc = MUXFS_EFS;
+		goto out;
+	}
+
 	fsz = st->st_size;
 	if (args->offset >= fsz) {
 		*rdsz_out = 0;
-		return 0;
+		rc = 0;
+		goto out2;
 	}
-
-	if ((fd = openat(root_fd, args->path, O_RDONLY)) == -1)
-		return MUXFS_EFS;
 
 	if (muxfs_dspush((void **)&buf, fsz))
 		exit(-1);
 
 	if (read(fd, buf, fsz) != fsz) {
 		rc = MUXFS_EFS;
-		goto fail;
+		goto out3;
 	}
 	muxfs_chk_init(&content_chk, alg);
 	muxfs_chk_update(&content_chk, buf, fsz);
 	muxfs_chk_final(content_sum, &content_chk);
-	if (bcmp(content_sum, &meta_buf->checksums[chksz], chksz) != 0) {
+	if (bcmp(content_sum, &meta->checksums[chksz], chksz) != 0) {
 		rc = MUXFS_ECHK;
-		goto fail;
+		goto out3;
 	}
 	rdsz = fsz - args->offset;
 	if (rdsz > args->size)
 		rdsz = args->size;
 	memcpy(args->buf_out, &buf[args->offset], rdsz);
 
-	if (muxfs_dspop(buf))
-		exit(-1);
-
 	*rdsz_out = rdsz;
-	return 0;
-fail:
+	rc = 0;
+out3:
 	if (muxfs_dspop(buf))
 		exit(-1);
+out2:
+	if (close(fd))
+		exit(-1);
+out:
 	return rc;
 }
 
 static int
 muxfs_readlink_inner(int root_fd, struct muxfs_op_read_args *args,
-    enum muxfs_chk_alg_type alg, size_t chksz, struct muxfs_desc *desc,
-    struct muxfs_meta_buffer *meta_buf, ssize_t *rdsz_out)
+    enum muxfs_chk_alg_type alg, size_t chksz, const struct muxfs_desc *desc,
+    const struct muxfs_meta *meta, int *err)
 {
 	struct muxfs_desc lnk_desc;
 	ssize_t lnksz, rdsz;
@@ -624,32 +706,34 @@ muxfs_readlink_inner(int root_fd, struct muxfs_op_read_args *args,
 	uint8_t lnk_meta_sum[MUXFS_CHKSZ_MAX];
 
 	memset(lnkbuf, 0, PATH_MAX);
-	if ((lnksz = readlinkat(root_fd, args->path, lnkbuf, PATH_MAX - 1))
-	    == -1)
-	{
+	muxfs_eids_set();
+	lnksz = readlinkat(root_fd, args->path, lnkbuf, PATH_MAX - 1);
+	*err = errno;
+	muxfs_eids_reset();
+	if (lnksz == -1)
 		return MUXFS_EFS;
-	}
 	if (lnksz >= PATH_MAX)
 		return MUXFS_EFS;
 
-	muxfs_desc_chk_provided_content(&lnk_desc,
-	    (uint8_t *)lnkbuf, lnksz, alg);
-	muxfs_desc_chk_meta(lnk_meta_sum, desc, alg);
-	if (bcmp(lnk_meta_sum, &meta_buf->checksums[0], chksz) != 0)
+	lnk_desc = *desc;
+	memset(lnk_desc.content_checksum, 0, MUXFS_CHKSZ_MAX);
+	muxfs_desc_chk_provided_content(&lnk_desc, (uint8_t *)lnkbuf, lnksz,
+	    alg);
+	muxfs_desc_chk_meta(lnk_meta_sum, &lnk_desc, alg);
+	if (bcmp(lnk_meta_sum, &meta->checksums[0], chksz) != 0)
 		return MUXFS_ECHK;
 
-	rdsz = (lnksz < args->size) ? lnksz : args->size;
+	rdsz = (lnksz < (args->size - 1)) ? lnksz : (args->size - 1);
 	memcpy(args->buf_out, lnkbuf, rdsz);
+	args->buf_out[rdsz] = '\0';
 
-	*rdsz_out = rdsz;
 	return 0;
 }
 
 static int
 muxfs_readdir_inner(dind dev_index, int root_fd,
     struct muxfs_op_read_args *args, enum muxfs_chk_alg_type alg, size_t chksz,
-    struct stat *st, struct muxfs_desc *desc,
-    struct muxfs_meta_buffer *meta_buf)
+    struct stat *st, struct muxfs_desc *desc, struct muxfs_meta *meta, int *err)
 {
 	int rc, fd;
 	uint8_t content_sum[MUXFS_CHKSZ_MAX];
@@ -661,11 +745,17 @@ muxfs_readdir_inner(dind dev_index, int root_fd,
 
 	rc = MUXFS_EINT;
 
-	if ((fd = openat(root_fd, args->path, O_RDONLY|O_DIRECTORY|O_NOFOLLOW))
-	    == -1) {
+	muxfs_eids_set();
+	fd = openat(root_fd, args->path, O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
+	*err = errno;
+	muxfs_eids_reset();
+	if (fd == -1) {
 		rc = MUXFS_EFS;
 		goto out;
 	}
+	if (close(fd))
+		exit(-1);
+
 	if (muxfs_pushdir(&dir, root_fd, args->path))
 		exit(-1);
 
@@ -673,7 +763,7 @@ muxfs_readdir_inner(dind dev_index, int root_fd,
 		rc = MUXFS_ECHK;
 		goto out2;
 	}
-	if (bcmp(content_sum, &meta_buf->checksums[chksz], chksz) != 0) {
+	if (bcmp(content_sum, &meta->checksums[chksz], chksz) != 0) {
 		rc = MUXFS_ECHK;
 		goto out2;
 	}
@@ -689,8 +779,6 @@ muxfs_readdir_inner(dind dev_index, int root_fd,
 	rc = 0;
 out2:
 	if (muxfs_popdir(&dir))
-		exit(-1);
-	if (close(fd))
 		exit(-1);
 out:
 	return rc;
@@ -708,14 +796,14 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 	int err, rc, subrc;
 	struct stat st;
 	ino_t ino;
-	struct muxfs_meta_buffer meta_buf;
+	struct muxfs_meta meta;
 	uint64_t eno;
 	struct muxfs_desc desc;
 
 	uint8_t chk_buf[MUXFS_CHKSZ_MAX];
 	ssize_t rdsz;
 
-	if ((dev_count = muxfs_dev_count()) == 0) \
+	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 
 	for (i = 0; i < dev_count; ++i) {
@@ -726,43 +814,47 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 		chksz = muxfs_chk_size(alg);
 		rdsz = -1;
 
-		if (fstatat(fd, args->path, &st, AT_SYMLINK_NOFOLLOW)) {
-			err = errno;
-			if ((err == ENOENT) && (muxfs_parent_readback(i,
-			    args->path)))
+		muxfs_eids_set();
+		subrc = fstatat(fd, args->path, &st, AT_SYMLINK_NOFOLLOW);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
+			if ((err == ENOENT) && muxfs_parent_readback(i,
+			    args->path))
 				goto fail;
 			rc = -err;
 			goto early;
 		}
 		ino = st.st_ino;
-		if (muxfs_meta_read(&meta_buf, i, ino))
+		if (muxfs_meta_read(&meta, i, ino))
 			goto fail;
-		eno = meta_buf.header.eno;
+		eno = meta.header.eno;
 		if (muxfs_desc_init_from_stat(&desc, &st, eno)) {
 			rc = -EOPNOTSUPP;
 			goto early;
 		}
-		memcpy(desc.content_checksum, &meta_buf.checksums[chksz],
+		memcpy(desc.content_checksum, &meta.checksums[chksz],
 		    chksz);
 		muxfs_desc_chk_meta(chk_buf, &desc, alg);
-		if (bcmp(chk_buf, &meta_buf.checksums[0], chksz) != 0)
+		if (bcmp(chk_buf, &meta.checksums[0], chksz) != 0)
 			goto fail;
 
 		switch (args->type) {
 		case MUXFS_RT_GETATTR:
-			subrc = muxfs_getattr_inner(args->st_out, &st, eno);
+			subrc = muxfs_getattr_inner(args->st_out, &st, eno,
+			    &err);
 			break;
 		case MUXFS_RT_READ:
 			subrc = muxfs_read_inner(fd, args, &st, alg, chksz,
-			    &meta_buf, &rdsz);
+			    &meta, &rdsz, &err);
 			break;
 		case MUXFS_RT_READLINK:
 			subrc = muxfs_readlink_inner(fd, args, alg, chksz,
-			    &desc, &meta_buf, &rdsz);
+			    &desc, &meta, &err);
 			break;
 		case MUXFS_RT_READDIR:
 			subrc = muxfs_readdir_inner(i, fd, args, alg, chksz,
-			    &st, &desc, &meta_buf);
+			    &st, &desc, &meta, &err);
 			break;
 		default:
 			exit(-1); /* Programming error. */
@@ -773,7 +865,7 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 		case MUXFS_EINT:
 			exit(-1); /* Unrecoverable runtime error. */
 		case MUXFS_EFS:
-			rc = -errno;
+			rc = -err;
 			goto early;
 		case MUXFS_ECHK:
 			goto fail;
@@ -838,7 +930,7 @@ muxfs_readlink(const char *path, char *buf_out, size_t size)
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
-	args.type = MUXFS_RT_GETATTR;
+	args.type = MUXFS_RT_READLINK;
 	args.path = path;
 	args.buf_out = buf_out;
 	args.size = size;
@@ -889,8 +981,8 @@ struct muxfs_op_update_args {
 static int
 muxfs_truncate_inner(int root_fd, struct muxfs_op_update_args *args,
     enum muxfs_chk_alg_type alg, size_t chksz, struct stat *st,
-    struct muxfs_meta_buffer *prewr_meta_buf,
-    struct muxfs_meta_buffer *wr_meta_buf, struct muxfs_desc *wr_desc)
+    struct muxfs_meta *prewr_meta, struct muxfs_meta *wr_meta,
+    struct muxfs_desc *wr_desc, int *err)
 {
 	int rc;
 	int fd;
@@ -901,57 +993,63 @@ muxfs_truncate_inner(int root_fd, struct muxfs_op_update_args *args,
 	uint8_t			prewr_content_sum[MUXFS_CHKSZ_MAX];
 	struct muxfs_chk	wr_content_chk;
 
+	muxfs_eids_set();
+	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
+	*err = errno;
+	muxfs_eids_reset();
+	if (fd == -1) {
+		rc = MUXFS_EFS;
+		goto out;
+	}
+
 	largest_sz = content_sz = st->st_size;
 	if (args->offset > largest_sz)
 		largest_sz = args->offset;
 
 	if (muxfs_dspush((void **)&content_buf, largest_sz))
 		exit(-1);
+
 	memset(content_buf, 0, largest_sz);
-	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
-	if (fd == -1) {
-		rc = MUXFS_EFS;
-		goto out2;
-	}
 	if (read(fd, content_buf, content_sz) != content_sz) {
 		rc = MUXFS_EFS;
-		goto out;
+		goto out3;
 	}
 	muxfs_chk_init(&prewr_content_chk, alg);
 	muxfs_chk_update(&prewr_content_chk, content_buf, content_sz);
 	muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
-	if (bcmp(prewr_content_sum, &prewr_meta_buf->checksums[chksz], chksz)
+	if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz], chksz)
 	    != 0) {
 		rc = MUXFS_ECHK;
-		goto out;
+		goto out3;
 	}
 
 	if (ftruncate(fd, args->offset)) {
 		rc = MUXFS_EFS;
-		goto out;
+		goto out3;
 	}
 
 	muxfs_chk_init(&wr_content_chk, alg);
 	muxfs_chk_update(&wr_content_chk, content_buf, args->offset);
 	muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
-	memcpy(&wr_meta_buf->checksums[chksz], wr_desc->content_checksum,
+	memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum,
 	    chksz);
 	
 	rc = 0;
-out:
-	if (close(fd))
-		exit(-1);
-out2:
+out3:
 	if (muxfs_dspop(content_buf))
 		exit(-1);
+/*out2:*/
+	if (close(fd))
+		exit(-1);
+out:
 	return rc;
 }
 
 static int
 muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
     enum muxfs_chk_alg_type alg, size_t chksz, struct stat *st,
-    struct muxfs_meta_buffer *prewr_meta_buf,
-    struct muxfs_meta_buffer *wr_meta_buf, struct muxfs_desc *wr_desc)
+    struct muxfs_meta *prewr_meta, struct muxfs_meta *wr_meta,
+    struct muxfs_desc *wr_desc, int *err)
 {
 	int rc;
 	int fd;
@@ -962,6 +1060,15 @@ muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
 	uint8_t			prewr_content_sum[MUXFS_CHKSZ_MAX];
 	struct muxfs_chk	wr_content_chk;
 
+	muxfs_eids_set();
+	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
+	*err = errno;
+	muxfs_eids_reset();
+	if (fd == -1) {
+		rc = MUXFS_EFS;
+		goto out;
+	}
+
 	largest_sz = prewr_sz = st->st_size;
 	wrsz = (args->offset + args->bufsz);
 	if (wrsz > largest_sz)
@@ -969,43 +1076,39 @@ muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
 
 	if (muxfs_dspush((void **)&content_buf, largest_sz))
 		exit(-1);
-	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
-	if (fd == -1) {
-		rc = MUXFS_EFS;
-		goto out2;
-	}
+
 	if (read(fd, content_buf, prewr_sz) != prewr_sz) {
 		rc = MUXFS_EFS;
-		goto out;
+		goto out3;
 	}
 	muxfs_chk_init(&prewr_content_chk, alg);
 	muxfs_chk_update(&prewr_content_chk, content_buf, prewr_sz);
 	muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
-	if (bcmp(prewr_content_sum, &prewr_meta_buf->checksums[chksz], chksz)
+	if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz], chksz)
 	    != 0) {
 		rc = MUXFS_ECHK;
-		goto out;
+		goto out3;
 	}
 
 	memcpy(content_buf + args->offset, args->buf, args->bufsz);
 	if (pwrite(fd, args->buf, args->bufsz, args->offset) != args->bufsz) {
 		rc = MUXFS_EFS;
-		goto out;
+		goto out3;
 	}
 
 	muxfs_chk_init(&wr_content_chk, alg);
 	muxfs_chk_update(&wr_content_chk, content_buf, largest_sz);
 	muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
-	memcpy(&wr_meta_buf->checksums[chksz], wr_desc->content_checksum,
-	    chksz);
+	memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum, chksz);
 	
 	rc = 0;
-out:
-	if (close(fd))
-		exit(-1);
-out2:
+out3:
 	if (muxfs_dspop(content_buf))
 		exit(-1);
+/*out2:*/
+	if (close(fd))
+		exit(-1);
+out:
 	return rc;
 }
 
@@ -1019,18 +1122,18 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 	enum muxfs_chk_alg_type	 alg;
 	size_t			 chksz;
 
-	int				 rc, subrc, subfd;
-	int				 has_write;
-	struct stat			 prewr_st;
-	ino_t				 prewr_ino;
-	struct muxfs_meta_buffer	 prewr_meta_buf;
-	uint64_t			 prewr_eno;
-	struct muxfs_desc		 prewr_desc;
-	uint8_t				 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
-	struct muxfs_desc		 wr_desc;
-	struct muxfs_meta_buffer	 wr_meta_buf;
+	int			 rc, err, subrc, subfd;
+	int			 has_write;
+	struct stat		 prewr_st;
+	ino_t			 prewr_ino;
+	struct muxfs_meta	 prewr_meta;
+	uint64_t		 prewr_eno;
+	struct muxfs_desc	 prewr_desc;
+	uint8_t			 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
+	struct muxfs_desc	 wr_desc;
+	struct muxfs_meta	 wr_meta;
 
-	struct muxfs_cud		 cud;
+	struct muxfs_cud	 cud;
 
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
@@ -1046,37 +1149,51 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 		alg = dev->conf.chk_alg_type;
 		chksz = muxfs_chk_size(alg);
 
-		if (fstatat(fd, args->path, &prewr_st, AT_SYMLINK_NOFOLLOW))
-			goto fail;
+		muxfs_eids_set();
+		subrc = fstatat(fd, args->path, &prewr_st, AT_SYMLINK_NOFOLLOW);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
+			if (has_write)
+				goto fail;
+			rc = -err;
+			goto early;
+		}
 		prewr_ino = prewr_st.st_ino;
-		if (muxfs_meta_read(&prewr_meta_buf, i, prewr_ino))
+		if (muxfs_meta_read(&prewr_meta, i, prewr_ino))
 			goto fail;
-		prewr_eno = prewr_meta_buf.header.eno;
+		prewr_eno = prewr_meta.header.eno;
 		if (muxfs_desc_init_from_stat(&prewr_desc, &prewr_st,
 		    prewr_eno))
 			goto fail;
 		memcpy(prewr_desc.content_checksum,
-		    &prewr_meta_buf.checksums[chksz], chksz);
+		    &prewr_meta.checksums[chksz], chksz);
 		muxfs_desc_chk_meta(prewr_meta_chk_buf, &prewr_desc, alg);
-		if (bcmp(prewr_meta_chk_buf, &prewr_meta_buf.checksums[0],
+		if (bcmp(prewr_meta_chk_buf, &prewr_meta.checksums[0],
 		    chksz) != 0)
 			goto fail;
 
-		wr_desc     = prewr_desc;
-		wr_meta_buf = prewr_meta_buf;
+		wr_desc = prewr_desc;
+		wr_meta = prewr_meta;
 
 		switch (args->type) {
 		case MUXFS_UT_CHMOD:
+			muxfs_eids_set();
 			subrc = fchmodat(fd, args->path, args->mode,
 			    AT_SYMLINK_NOFOLLOW);
+			err = errno;
+			muxfs_eids_reset();
 			if (subrc)
 				subrc = MUXFS_EFS;
 			wr_desc.perms = (prewr_desc.perms & S_IFMT) |
 			    ((~S_IFMT) & args->mode);
 			break;
 		case MUXFS_UT_CHOWN:
+			muxfs_eids_set();
 			subrc = fchownat(fd, args->path, args->uid, args->gid,
 			    AT_SYMLINK_NOFOLLOW);
+			err = errno;
+			muxfs_eids_reset();
 			if (subrc)
 				subrc = MUXFS_EFS;
 			if (args->uid != -1)
@@ -1085,18 +1202,25 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 				wr_desc.group = args->gid;
 			break;
 		case MUXFS_UT_UTIMENS:
+			muxfs_eids_set();
 			subrc = utimensat(fd, args->path, args->ts,
 			    AT_SYMLINK_NOFOLLOW);
+			err = errno;
+			muxfs_eids_reset();
 			if (subrc)
 				subrc = MUXFS_EFS;
 			break;
 		case MUXFS_UT_TRUNCATE:
+			muxfs_eids_set();
 			subrc = muxfs_truncate_inner(fd, args, alg, chksz,
-			    &prewr_st, &prewr_meta_buf, &wr_meta_buf, &wr_desc);
+			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err);
+			muxfs_eids_reset();
 			break;
 		case MUXFS_UT_WRITE:
+			muxfs_eids_set();
 			subrc = muxfs_write_inner(fd, args, alg, chksz,
-			    &prewr_st, &prewr_meta_buf, &wr_meta_buf, &wr_desc);
+			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err);
+			muxfs_eids_reset();
 			break;
 		default:
 			exit(-1); /* Programming error. */
@@ -1106,21 +1230,18 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 			break;
 		case MUXFS_EINT:
 			exit(-1); /* Unrecoverable runtime error. */
-			break;
 		case MUXFS_EFS:
 			if (has_write)
 				goto fail;
-			rc = -errno;
+			rc = -err;
 			goto early;
-			break;
 		case MUXFS_ECHK:
 			goto fail;
-			break;
 		default:
 			exit(-1); /* Programming error. */
 		}
-		muxfs_desc_chk_meta(&wr_meta_buf.checksums[0], &wr_desc, alg);
-		if (muxfs_meta_write(&wr_meta_buf, i, prewr_ino))
+		muxfs_desc_chk_meta(&wr_meta.checksums[0], &wr_desc, alg);
+		if (muxfs_meta_write(&wr_meta, i, prewr_ino))
 			goto fail;
 
 		if ((subfd = openat(fd, args->path, O_RDONLY|O_NOFOLLOW)) == -1)
@@ -1132,12 +1253,12 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 		if (fsync(dev->meta_fd))
 			exit(-1);
 	
-		if (muxfs_readback(i, args->path, &wr_meta_buf))
+		if (muxfs_readback(i, args->path, &wr_meta))
 			goto fail;
 
 		cud.type = MUXFS_CUD_UPDATE;
 		cud.path = args->path;
-		cud.pre_mbuf = prewr_meta_buf;
+		cud.pre_meta = prewr_meta;
 		if (muxfs_ancestors_meta_recompute(i, &cud))
 			goto fail;
 
@@ -1170,17 +1291,17 @@ muxfs_rename(const char *from, const char *to)
 	enum muxfs_chk_alg_type	 alg;
 	size_t			 chksz;
 
-	int				 rc;
-	int				 has_write;
-	struct stat			 prewr_st;
-	ino_t				 prewr_ino;
-	struct muxfs_meta_buffer	 prewr_meta_buf;
-	uint64_t			 prewr_eno;
-	struct muxfs_desc		 prewr_desc;
-	uint8_t				 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
-	struct stat			 postwr_st;
+	int			 rc, err, subrc;
+	int			 has_write;
+	struct stat		 prewr_st;
+	ino_t			 prewr_ino;
+	struct muxfs_meta	 prewr_meta;
+	uint64_t		 prewr_eno;
+	struct muxfs_desc	 prewr_desc;
+	uint8_t			 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
+	struct stat		 postwr_st;
 
-	struct muxfs_cud		 cud;
+	struct muxfs_cud	 cud;
 
 	if (muxfs_path_sanitize(&from))
 		return -EIO;
@@ -1201,19 +1322,27 @@ muxfs_rename(const char *from, const char *to)
 		alg = dev->conf.chk_alg_type;
 		chksz = muxfs_chk_size(alg);
 
-		if (fstatat(fd, from, &prewr_st, AT_SYMLINK_NOFOLLOW))
-			goto fail;
+		muxfs_eids_set();
+		subrc = fstatat(fd, from, &prewr_st, AT_SYMLINK_NOFOLLOW);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
+			if (has_write)
+				goto fail;
+			rc = -err;
+			goto early;
+		}
 		prewr_ino = prewr_st.st_ino;
-		if (muxfs_meta_read(&prewr_meta_buf, i, prewr_ino))
+		if (muxfs_meta_read(&prewr_meta, i, prewr_ino))
 			goto fail;
-		prewr_eno = prewr_meta_buf.header.eno;
+		prewr_eno = prewr_meta.header.eno;
 		if (muxfs_desc_init_from_stat(&prewr_desc, &prewr_st,
 		    prewr_eno))
 			goto fail;
 		memcpy(prewr_desc.content_checksum,
-		    &prewr_meta_buf.checksums[chksz], chksz);
+		    &prewr_meta.checksums[chksz], chksz);
 		muxfs_desc_chk_meta(prewr_meta_chk_buf, &prewr_desc, alg);
-		if (bcmp(prewr_meta_chk_buf, &prewr_meta_buf.checksums[0],
+		if (bcmp(prewr_meta_chk_buf, &prewr_meta.checksums[0],
 		    chksz) != 0)
 			goto fail;
 
@@ -1224,10 +1353,14 @@ muxfs_rename(const char *from, const char *to)
 		 * The first rename tests if the requested operation is
 		 * possible.
 		 */
-		if (renameat(fd, from, fd, to)) {
+		muxfs_eids_set();
+		subrc = renameat(fd, from, fd, to);
+		err = errno;
+		muxfs_eids_reset();
+		if (subrc) {
 			if (has_write)
 				goto fail;
-			rc = -errno;
+			rc = -err;
 			goto early;
 		}
 
@@ -1245,7 +1378,7 @@ muxfs_rename(const char *from, const char *to)
 			goto fail;
 		cud.type = MUXFS_CUD_DELETE;
 		cud.path = from;
-		cud.pre_mbuf = prewr_meta_buf;
+		cud.pre_meta = prewr_meta;
 		if (muxfs_ancestors_meta_recompute(i, &cud))
 			goto fail;
 
@@ -1255,11 +1388,11 @@ muxfs_rename(const char *from, const char *to)
 		 */
 		if (renameat(fd, ".muxfs/rename.tmp", fd, to))
 			goto fail;
-		if (muxfs_readback(i, to, &prewr_meta_buf))
+		if (muxfs_readback(i, to, &prewr_meta))
 			goto fail;
 		cud.type = MUXFS_CUD_CREATE;
 		cud.path = to;
-		cud.pre_mbuf = prewr_meta_buf;
+		cud.pre_meta = prewr_meta;
 		if (muxfs_ancestors_meta_recompute(i, &cud))
 			goto fail;
 

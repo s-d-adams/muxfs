@@ -357,8 +357,6 @@ muxfs_degraded_set_val(size_t dev_index, uint64_t val)
 	struct muxfs_dev *dev;
 	uint64_t *deg;
 
-	debug("%lu degraded=%llu\n", dev_index, val);
-
 	if (muxfs_dev_get(&dev, dev_index))
 		return 1;
 
@@ -377,6 +375,7 @@ muxfs_degraded_set_val(size_t dev_index, uint64_t val)
 MUXFS int
 muxfs_degraded_set(size_t dev_index)
 {
+	muxfs_alert("Degraded: %llu", dev_index);
 	return muxfs_degraded_set_val(dev_index, 1);
 }
 
@@ -412,12 +411,12 @@ muxfs_meta_size(size_t *size_out, dind dev_index)
 }
 
 MUXFS int
-muxfs_meta_read(struct muxfs_meta_buffer *meta, dind dev_index, uint64_t ino)
+muxfs_meta_read(struct muxfs_meta *meta, dind dev_index, uint64_t ino)
 {
 	struct muxfs_dev *dev;
 	size_t msz;
 	ssize_t rdsz;
-	struct muxfs_meta_buffer disk_meta;
+	struct muxfs_meta disk_meta;
 
 	if (muxfs_dev_get(&dev, dev_index))
 		return 1;
@@ -437,10 +436,10 @@ muxfs_meta_read(struct muxfs_meta_buffer *meta, dind dev_index, uint64_t ino)
 }
 
 MUXFS int
-muxfs_meta_write_fd(int fd, const struct muxfs_meta_buffer *meta, uint64_t ino,
+muxfs_meta_write_fd(int fd, const struct muxfs_meta *meta, uint64_t ino,
     size_t msz)
 {
-	struct muxfs_meta_buffer disk_meta;
+	struct muxfs_meta disk_meta;
 	ssize_t wrsz;
 
 	memcpy(&disk_meta, meta, msz);
@@ -455,8 +454,7 @@ muxfs_meta_write_fd(int fd, const struct muxfs_meta_buffer *meta, uint64_t ino,
 }
 
 MUXFS int
-muxfs_meta_write(const struct muxfs_meta_buffer *meta, dind dev_index,
-    uint64_t ino)
+muxfs_meta_write(const struct muxfs_meta *meta, dind dev_index, uint64_t ino)
 {
 	struct muxfs_dev *dev;
 	size_t msz;

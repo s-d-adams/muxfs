@@ -17,9 +17,11 @@
 
 #include <sys/types.h>
 
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 #include <unistd.h>
 
 #include "debug.h"
@@ -35,6 +37,7 @@ struct muxfs_state {
 	struct muxfs_restore_item *restore_queue, *front, *back;
 	size_t restore_queue_size;
 	uint64_t next_eno;
+	struct syslog_data log;
 };
 
 static struct muxfs_state muxfs_global_state;
@@ -57,7 +60,7 @@ muxfs_state_restore_push_back(dind dev_index, const char *path)
 	struct muxfs_restore_item **q, *curr, *next;
 	size_t *qsz, next_offset;
 
-	debug("Restore push: %lu:/%s\n", dev_index, path);
+	muxfs_warn("Corrupted: %lu:/%s\n", dev_index, path);
 
 	q = &muxfs_global_state.restore_queue;
 	qsz = &muxfs_global_state.restore_queue_size;
@@ -193,4 +196,50 @@ muxfs_state_eno_next_return(uint64_t eno)
 	if (eno == (*ne) - 1)
 		--(*ne);
 	return 0;
+}
+
+MUXFS int
+muxfs_state_syslog_init(void)
+{
+	muxfs_global_state.log = (struct syslog_data)SYSLOG_DATA_INIT;
+	openlog_r("muxfs", LOG_PID|LOG_NDELAY, LOG_DAEMON,
+	    &muxfs_global_state.log);
+	return 0;
+}
+
+MUXFS int
+muxfs_state_syslog_final(void)
+{
+	closelog_r(&muxfs_global_state.log);
+	return 0;
+}
+
+MUXFS void
+muxfs_info(const char *msg, ...)
+{
+	va_list va_args;
+
+	va_start(va_args, msg);
+	vsyslog_r(LOG_INFO, &muxfs_global_state.log, msg, va_args);
+	va_end(va_args);
+}
+
+MUXFS void
+muxfs_warn(const char *msg, ...)
+{
+	va_list va_args;
+
+	va_start(va_args, msg);
+	vsyslog_r(LOG_WARNING, &muxfs_global_state.log, msg, va_args);
+	va_end(va_args);
+}
+
+MUXFS void
+muxfs_alert(const char *msg, ...)
+{
+	va_list va_args;
+
+	va_start(va_args, msg);
+	vsyslog_r(LOG_ALERT, &muxfs_global_state.log, msg, va_args);
+	va_end(va_args);
 }

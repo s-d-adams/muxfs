@@ -33,7 +33,7 @@
  *
  * An allocation may 'grow', increasing its allocated size by a number of
  * bytes, provided that it is the most recently 'pushed' allocation.  Calling
- * dsgrow() on any other pointer is undefined.
+ * muxfs_dsgrow() on any other pointer is undefined.
  */
 
 #ifndef _DS_H_

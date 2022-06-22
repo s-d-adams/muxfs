@@ -1,0 +1,19 @@
+# Copy this file to test.conf, fill in the variables, and remove the exit line.
+exit 1
+
+# The test suite will create and destroy the 'dev' array and the mount-point
+# itself so specify below unused filesystem paths with existing parent
+# directories.
+
+# The mount-point used by the test suite.
+mp=
+
+# The path for the first 'dev' in the array.
+dev_a=
+
+# The path for the second 'dev' in the array.
+dev_b=
+
+# An unprivileged user that may be used for running tests (must be able to su
+# to it without password).  Also used to test chown.
+unpriv_user=

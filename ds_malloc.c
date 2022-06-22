@@ -68,4 +68,3 @@ muxfs_dsgrow(void **p_inout, size_t s)
 	*p_inout = p;
 	return 0;
 }
-

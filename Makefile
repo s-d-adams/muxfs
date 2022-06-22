@@ -4,8 +4,13 @@ CC=cc
 CFLAGS=-std=c99 -O2 -pedantic -Wdeprecated -Wall -Wno-unused-function -Werror
 #CFLAGS=-std=c99 -O0 -g -pedantic -Wdeprecated -Wall -Wno-unused-function \
 #    -Werror
-#DS=ds
-DS=ds_malloc
+DS=ds
+#DS=ds_malloc
+.if $(DS) == 'ds'
+MUXFS_DS=1
+.else
+MUXFS_DS=0
+.endif
 OBJ=chk.o \
     conf.o \
     desc.o \
@@ -73,6 +78,7 @@ mount_muxfs_unity: gen_h_unity
 	   -I. \
 	   -DMUXFS=static \
 	   -DMUXFS_DEC=static \
+	   -DMUXFS_DS=$(MUXFS_DS) \
 	   -Dmuxfs_chk=muxfs_chk_p \
 	   -lfuse -lz \
 	   -o mount_muxfs \
@@ -83,6 +89,7 @@ newfs_muxfs_unity: gen_h_unity
 	   -I. \
 	   -DMUXFS=static \
 	   -DMUXFS_DEC=static \
+	   -DMUXFS_DS=$(MUXFS_DS) \
 	   -Dmuxfs_chk=muxfs_chk_p \
 	   -lz \
 	   -o newfs_muxfs \

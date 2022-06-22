@@ -64,6 +64,8 @@ main(int argc, char **argv)
 	int n;
 	char *fuse_argv[8];
 
+	if (muxfs_state_syslog_init())
+		return -1;
 	if (muxfs_dsinit())
 		return -1;
 
@@ -72,7 +74,7 @@ main(int argc, char **argv)
 	/*fuse_argv[n++] = "-f";*/
 	/*fuse_argv[n++] = "-odebug";*/
 	fuse_argv[n++] = "-ouse_ino";
-	/*fuse_argv[n++] = "-oallow_other";*/
+	fuse_argv[n++] = "-oallow_other";
 	fuse_argv[n++] = argv[argc - 1];
 
 	if (muxfs_parse_args(argc, argv)) {

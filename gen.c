@@ -37,7 +37,7 @@ main(int argc, char *argv[])
 	printf(" * Read gen.c for more information.\n */\n");
 	printf("\n#ifndef _GEN_H_\n#define _GEN_H_\n\n");
 	printf("struct muxfs_chk { uint8_t priv[%lu]; };\n",
-	       sizeof(struct muxfs_chk_p));
+	    sizeof(struct muxfs_chk_p));
 	printf("\n#endif /* _GEN_H_ */\n");
 	return 0;
 }

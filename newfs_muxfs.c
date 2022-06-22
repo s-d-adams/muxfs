@@ -52,15 +52,9 @@ muxfs_dir_is_empty(int *empty_out, char const *path)
 	const char *dname;
 	struct dirent *dirent;
 	int empty;
-	int abs_root_fd;
 
-	if ((abs_root_fd = open("/", O_RDONLY)) == -1)
+	if (muxfs_pushdir(&dir, AT_FDCWD, path))
 		return 1;
-	if (muxfs_pushdir(&dir, abs_root_fd, path)) {
-		if (close(abs_root_fd))
-			exit(-1);
-		return 1;
-	}
 
 	empty = 1;
 	for (i = 0; i < dir.ent_count; ++i) {
@@ -76,8 +70,6 @@ muxfs_dir_is_empty(int *empty_out, char const *path)
 	}
 
 	if (muxfs_popdir(&dir))
-		exit(-1);
-	if (close(abs_root_fd))
 		exit(-1);
 
 	*empty_out = empty;
@@ -98,14 +90,14 @@ main(int argc, char *argv[])
 	uuid_t uuid;
 	uint32_t uuid_status;
 	int fd;
-	size_t chksz, mbufsz;
+	size_t chksz, metasz;
 	uint64_t eno;
 	struct muxfs_dev_state dstate;
 	struct stat st;
 	ino_t ino;
 	struct muxfs_desc desc;
 	struct muxfs_chk chk;
-	struct muxfs_meta_buffer mbuf;
+	struct muxfs_meta meta;
 	struct muxfs_assign assign;
 
 	if (muxfs_dsinit())
@@ -188,7 +180,7 @@ main(int argc, char *argv[])
 	}
 
 	chksz = muxfs_chk_size(alg);
-	if (muxfs_meta_size_raw(&mbufsz, alg))
+	if (muxfs_meta_size_raw(&metasz, alg))
 		goto out;
 	eno = 0;
 	for (i = 0; i < dev_root_count; ++i) {
@@ -241,14 +233,14 @@ main(int argc, char *argv[])
 			goto out;
 		muxfs_chk_init(&chk, alg);
 		muxfs_chk_final(desc.content_checksum, &chk);
-		mbuf = (struct muxfs_meta_buffer) {
+		meta = (struct muxfs_meta) {
 			.header = (struct muxfs_meta_header) {
 				.flags = MF_ASSIGNED,
 				.eno = eno,
 			},
 		};
-		memcpy(&mbuf.checksums[chksz], desc.content_checksum, chksz);
-		muxfs_desc_chk_meta(&mbuf.checksums[0], &desc, alg);
+		memcpy(&meta.checksums[chksz], desc.content_checksum, chksz);
+		muxfs_desc_chk_meta(&meta.checksums[0], &desc, alg);
 		if (strlen(dev_roots[i]) + strlen(sepdotmuxfs) +
 		    strlen(sepmetadotdb) >= PATH_MAX)
 			goto out;
@@ -256,7 +248,7 @@ main(int argc, char *argv[])
 		strcat(path_buf, sepmetadotdb);
 		if ((fd = open(path_buf, O_RDWR|O_CREAT|O_EXCL, 0700)) == -1)
 			goto out;
-		if (muxfs_meta_write_fd(fd, &mbuf, ino, mbufsz)) {
+		if (muxfs_meta_write_fd(fd, &meta, ino, metasz)) {
 			if (close(fd))
 				exit(-1);
 			goto out;

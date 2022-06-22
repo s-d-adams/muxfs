@@ -1,0 +1,8 @@
+0.1-current (2022-06-22):
+* Test suite.
+* Access from other users.
+* Dynamic stack allocator.
+* Bug fixes.
+
+0.0-current (2022-06-10):
+* Initial publication.
