@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/mman.h>
 #include <sys/syslimits.h>
 
 #include <dirent.h>
@@ -28,7 +29,6 @@
 #include <unistd.h>
 
 #include "ds.h"
-#include "mount_muxfs.h"
 #include "muxfs.h"
 #include "gen.h"
 
@@ -178,14 +178,37 @@ muxfs_open(const char *path, struct fuse_file_info *ffi)
 			return -err;
 		if (close(fd))
 			exit(-1);
+		return 0;
 	}
-	return 0;
+	return -EIO;
 }
 
 static int
 muxfs_opendir(const char *path, struct fuse_file_info *ffi)
 {
-	return 0;
+	dind dev_count, i;
+	struct muxfs_dev *dev;
+	int fd, err;
+
+	if (muxfs_path_sanitize(&path))
+		return -EIO;
+
+	if ((dev_count = muxfs_dev_count()) == 0)
+		return -EIO;
+	for (i = 0; i < dev_count; ++i) {
+		if (muxfs_dev_get(&dev, i))
+			continue;
+		muxfs_eids_set();
+		fd = openat(dev->root_fd, path, ffi->flags|O_DIRECTORY);
+		err = errno;
+		muxfs_eids_reset();
+		if (fd == -1)
+			return -err;
+		if (close(fd))
+			exit(-1);
+		return 0;
+	}
+	return -EIO;
 }
 
 static int
@@ -276,7 +299,8 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			.eno = eno,
 			.owner = fuse_ctx->uid,
 			.group = parent_gid,
-			.perms = args->mode
+			.mode = args->mode,
+			.size = 0,
 		};
 		if (muxfs_desc_type_from_mode(&desc.type, args->mode)) {
 			rc = -EOPNOTSUPP;
@@ -290,8 +314,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 		}
 		muxfs_chk_final(desc.content_checksum, &content_chk);
 	
-		memcpy(&meta.checksums[chksz],
-		    desc.content_checksum, chksz);
+		memcpy(&meta.checksums[chksz], desc.content_checksum, chksz);
 		muxfs_desc_chk_meta(&meta.checksums[0], &desc, alg);
 		meta.header.eno = eno;
 		meta.header.flags = MF_ASSIGNED;
@@ -366,7 +389,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 		if (fsync(dev->assign_fd))
 			exit(-1);
 	
-		if (muxfs_readback(i, args->path, &meta))
+		if (muxfs_readback(i, args->path, 0, &meta))
 			goto fail;
 
 		cud.type = MUXFS_CUD_CREATE;
@@ -511,6 +534,11 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 			subrc = unlinkat(fd, path, 0);
 			err = errno;
 			muxfs_eids_reset();
+			if (prewr_st.st_size > MUXFS_BLOCK_SIZE) {
+				if (muxfs_lfile_delete(dev->lfile_fd,
+				    prewr_ino))
+					goto fail;
+			}
 			break;
 		case MUXFS_DT_RMDIR:
 			muxfs_eids_set();
@@ -637,14 +665,19 @@ muxfs_getattr_inner(struct stat *st_out, struct stat *st, uint64_t eno,
 static int
 muxfs_read_inner(int root_fd, struct muxfs_op_read_args *args, struct stat *st,
     enum muxfs_chk_alg_type alg, size_t chksz, struct muxfs_meta *meta,
-    ssize_t *rdsz_out, int *err)
+    ssize_t *rdsz_out, int *err, int lfile_fd)
 {
 	int fd, rc;
 	size_t fsz;
-	uint8_t *buf;
+	uint8_t buf[MUXFS_BLOCK_SIZE];
 	struct muxfs_chk content_chk;
 	uint8_t content_sum[MUXFS_CHKSZ_MAX];
 	ssize_t rdsz;
+	struct muxfs_range r;
+	size_t i_offset, out_offset, out_size, buf_offset;
+	uint64_t i;
+	int lfd;
+	uint8_t *lfile;
 
 	rc = MUXFS_EINT;
 
@@ -664,29 +697,77 @@ muxfs_read_inner(int root_fd, struct muxfs_op_read_args *args, struct stat *st,
 		goto out2;
 	}
 
-	if (muxfs_dspush((void **)&buf, fsz))
-		exit(-1);
-
-	if (read(fd, buf, fsz) != fsz) {
-		rc = MUXFS_EFS;
-		goto out3;
+	if (fsz <= MUXFS_BLOCK_SIZE) {
+		if (read(fd, buf, fsz) != fsz) {
+			rc = MUXFS_EFS;
+			goto out2;
+		}
+		muxfs_chk_init(&content_chk, alg);
+		muxfs_chk_update(&content_chk, buf, fsz);
+		muxfs_chk_final(content_sum, &content_chk);
+		if (bcmp(content_sum, &meta->checksums[chksz], chksz) != 0) {
+			rc = MUXFS_ECHK;
+			goto out2;
+		}
+		rdsz = fsz - args->offset;
+		if (rdsz > args->size)
+			rdsz = args->size;
+		memcpy(args->buf_out, &buf[args->offset], rdsz);
+	
+		*rdsz_out = rdsz;
+		rc = 0;
+		goto out2;
 	}
-	muxfs_chk_init(&content_chk, alg);
-	muxfs_chk_update(&content_chk, buf, fsz);
-	muxfs_chk_final(content_sum, &content_chk);
-	if (bcmp(content_sum, &meta->checksums[chksz], chksz) != 0) {
-		rc = MUXFS_ECHK;
-		goto out3;
-	}
-	rdsz = fsz - args->offset;
-	if (rdsz > args->size)
-		rdsz = args->size;
-	memcpy(args->buf_out, &buf[args->offset], rdsz);
 
-	*rdsz_out = rdsz;
+	r.byte_begin = args->offset;
+	r.byte_end = args->offset + args->size;
+	if (r.byte_end > fsz)
+		r.byte_end = fsz;
+	muxfs_range_compute(&r, chksz);
+	out_offset = 0;
+
+	if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_RDONLY))
+		goto out2;
+	if ((lfile = mmap(NULL, r.lfilesz, PROT_READ, MAP_SHARED, lfd,
+	    r.lfileoff)) == MAP_FAILED)
+		goto out3;
+
+	for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+		i_offset = i * MUXFS_BLOCK_SIZE;
+		rdsz = MUXFS_BLOCK_SIZE;
+		if (i_offset + rdsz > fsz)
+			rdsz = fsz - i_offset;
+		if (pread(fd, buf, rdsz, i_offset) != rdsz) {
+			rc = MUXFS_EFS;
+			goto out4;
+		}
+		muxfs_chk_init(&content_chk, alg);
+		muxfs_chk_update(&content_chk, buf, rdsz);
+		muxfs_chk_final(content_sum, &content_chk);
+		if (bcmp(content_sum, &lfile[chksz * (i - r.blk_index_begin)],
+		    chksz) != 0) {
+			rc = MUXFS_ECHK;
+			goto out4;
+		}
+		buf_offset = 0;
+		out_size = rdsz;
+		if (i_offset < r.byte_begin) {
+			buf_offset = (r.byte_begin - i_offset);
+			out_size -= buf_offset;
+		}
+		memcpy(&args->buf_out[out_offset], &buf[buf_offset], out_size);
+		out_offset += out_size;
+	}
+
+	*rdsz_out = out_offset;
 	rc = 0;
+out4:
+	if (r.lfilesz == 0)
+		exit(-1); /* Programming error. */
+	if (munmap(lfile, r.lfilesz))
+		exit(-1);
 out3:
-	if (muxfs_dspop(buf))
+	if (close(lfd))
 		exit(-1);
 out2:
 	if (close(fd))
@@ -833,8 +914,7 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 			rc = -EOPNOTSUPP;
 			goto early;
 		}
-		memcpy(desc.content_checksum, &meta.checksums[chksz],
-		    chksz);
+		memcpy(desc.content_checksum, &meta.checksums[chksz], chksz);
 		muxfs_desc_chk_meta(chk_buf, &desc, alg);
 		if (bcmp(chk_buf, &meta.checksums[0], chksz) != 0)
 			goto fail;
@@ -846,7 +926,7 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 			break;
 		case MUXFS_RT_READ:
 			subrc = muxfs_read_inner(fd, args, &st, alg, chksz,
-			    &meta, &rdsz, &err);
+			    &meta, &rdsz, &err, dev->lfile_fd);
 			break;
 		case MUXFS_RT_READLINK:
 			subrc = muxfs_readlink_inner(fd, args, alg, chksz,
@@ -982,16 +1062,31 @@ static int
 muxfs_truncate_inner(int root_fd, struct muxfs_op_update_args *args,
     enum muxfs_chk_alg_type alg, size_t chksz, struct stat *st,
     struct muxfs_meta *prewr_meta, struct muxfs_meta *wr_meta,
-    struct muxfs_desc *wr_desc, int *err)
+    struct muxfs_desc *wr_desc, int *err, int lfile_fd)
 {
 	int rc;
 	int fd;
-	uint8_t *content_buf;
-	size_t content_sz, largest_sz;
+	uint8_t content_buf[MUXFS_BLOCK_SIZE];
+	size_t prewr_sz, smaller_sz, larger_sz;
 
 	struct muxfs_chk	prewr_content_chk;
 	uint8_t			prewr_content_sum[MUXFS_CHKSZ_MAX];
 	struct muxfs_chk	wr_content_chk;
+
+	struct muxfs_range r;
+	size_t rdsz, i_offset, off, beginsz, padsz;
+	uint64_t i;
+	int lfd;
+	uint8_t *lfile;
+	int szcase;
+
+	const size_t blksz = MUXFS_BLOCK_SIZE;
+
+	rc = MUXFS_EINT;
+	fd = -1;
+	lfd = -1;
+	lfile = MAP_FAILED;
+	r.lfilesz = 0;
 
 	muxfs_eids_set();
 	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
@@ -1002,46 +1097,245 @@ muxfs_truncate_inner(int root_fd, struct muxfs_op_update_args *args,
 		goto out;
 	}
 
-	largest_sz = content_sz = st->st_size;
-	if (args->offset > largest_sz)
-		largest_sz = args->offset;
+	larger_sz = smaller_sz = prewr_sz = st->st_size;
+	if (args->offset > larger_sz)
+		larger_sz = args->offset;
+	if (args->offset < smaller_sz)
+		smaller_sz = args->offset;
 
-	if (muxfs_dspush((void **)&content_buf, largest_sz))
-		exit(-1);
-
-	memset(content_buf, 0, largest_sz);
-	if (read(fd, content_buf, content_sz) != content_sz) {
-		rc = MUXFS_EFS;
-		goto out3;
+	if (args->offset == prewr_sz) {
+		rc = 0;
+		goto out;
 	}
-	muxfs_chk_init(&prewr_content_chk, alg);
-	muxfs_chk_update(&prewr_content_chk, content_buf, content_sz);
-	muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
-	if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz], chksz)
-	    != 0) {
-		rc = MUXFS_ECHK;
-		goto out3;
+
+	if (prewr_sz <= blksz) {
+		memset(content_buf, 0, blksz);
+		if (pread(fd, content_buf, prewr_sz, 0) != prewr_sz) {
+			rc = MUXFS_EFS;
+			goto out;
+		}
+		muxfs_chk_init(&prewr_content_chk, alg);
+		muxfs_chk_update(&prewr_content_chk, content_buf, prewr_sz);
+		muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
+		if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz],
+		    chksz) != 0) {
+			rc = MUXFS_ECHK;
+			goto out;
+		}
+	} else {
+		if (args->offset <= prewr_sz) {
+			r.byte_begin = args->offset;
+			r.byte_end = prewr_sz;
+		} else {
+			r.byte_begin = r.byte_end = prewr_sz;
+			if (r.byte_begin > 1)
+				--r.byte_begin;
+		}
+		muxfs_range_compute(&r, chksz);
+
+		if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_RDONLY))
+			goto out;
+		if ((lfile = mmap(NULL, r.lfilesz, PROT_READ, MAP_SHARED, lfd,
+		    r.lfileoff)) == MAP_FAILED)
+			goto out;
+	
+		for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+			i_offset = i * blksz;
+			rdsz = blksz;
+			if (i_offset + rdsz > prewr_sz)
+				rdsz = prewr_sz - i_offset;
+			if (pread(fd, content_buf, rdsz, i_offset) != rdsz) {
+				rc = MUXFS_EFS;
+				goto out;
+			}
+			muxfs_chk_init(&prewr_content_chk, alg);
+			muxfs_chk_update(&prewr_content_chk, content_buf, rdsz);
+			muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
+			if (bcmp(prewr_content_sum, &lfile[chksz * (i -
+			    r.blk_index_begin)], chksz) != 0) {
+				rc = MUXFS_ECHK;
+				goto out;
+			}
+		}
+
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+		lfile = MAP_FAILED;
+		r.lfilesz = 0;
+		if (close(lfd))
+			exit(-1);
+		lfd = -1;
+	}
+
+	szcase = (prewr_sz > blksz) ? 1 : 0;
+	szcase += (args->offset > blksz) ? 2 : 0;
+	switch (szcase) {
+	case 1:
+		if (muxfs_lfile_delete(lfile_fd, st->st_ino))
+			goto out;
+		memset(content_buf, 0, blksz);
+		if (pread(fd, content_buf, args->offset, 0) != args->offset) {
+			rc = MUXFS_EFS;
+			goto out;
+		}
+		/* FALLTHROUGH */
+	case 0:
+		muxfs_chk_init(&wr_content_chk, alg);
+		muxfs_chk_update(&wr_content_chk, content_buf, args->offset);
+		muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
+		memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum,
+		    chksz);
+		break;
+	case 2:
+		if (muxfs_lfile_create(lfile_fd, chksz, st->st_ino,
+		    args->offset))
+			goto out;
+		r.byte_begin = 0;
+		r.byte_end = args->offset;
+		muxfs_range_compute(&r, chksz);
+
+		if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_WRONLY))
+			goto out;
+		if ((lfile = mmap(NULL, r.lfilesz, PROT_WRITE, MAP_SHARED, lfd,
+		    r.lfileoff)) == MAP_FAILED)
+			goto out;
+	
+		for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+			i_offset = i * blksz;
+			rdsz = blksz;
+			if (i_offset + rdsz > args->offset)
+				rdsz = args->offset - i_offset;
+			if (pread(fd, content_buf, rdsz, i_offset) != rdsz) {
+				rc = MUXFS_EFS;
+				goto out;
+			}
+			muxfs_chk_init(&wr_content_chk, alg);
+			muxfs_chk_update(&wr_content_chk, content_buf, rdsz);
+			muxfs_chk_final(&lfile[chksz * i], &wr_content_chk);
+		}
+
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+		lfile = MAP_FAILED;
+		r.lfilesz = 0;
+		if (close(lfd))
+			exit(-1);
+		lfd = -1;
+
+		if (muxfs_lfile_ancestors_recompute(wr_desc->content_checksum,
+		    lfile_fd, alg, st->st_ino, args->offset, r.blk_index_begin,
+		    r.blk_index_end))
+			goto out;
+		break;
+	case 3:
+		if (muxfs_lfile_resize(lfile_fd, chksz, st->st_ino,
+		    prewr_sz, args->offset))
+			goto out;
+		if (args->offset < prewr_sz) {
+			r.byte_begin = r.byte_end = args->offset;
+			if (r.byte_begin > 0)
+				--r.byte_begin;
+			muxfs_range_compute(&r, chksz);
+
+			if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino,
+			    O_WRONLY))
+				goto out;
+			if ((lfile = mmap(NULL, r.lfilesz, PROT_WRITE,
+			    MAP_SHARED, lfd, r.lfileoff)) == MAP_FAILED)
+				goto out;
+
+			rdsz = args->offset - r.blk_begin;
+			if (pread(fd, content_buf, rdsz, r.blk_begin)
+			    != rdsz) {
+				rc = MUXFS_EFS;
+				goto out;
+			}
+
+			muxfs_chk_init(&wr_content_chk, alg);
+			muxfs_chk_update(&wr_content_chk, content_buf, rdsz);
+			muxfs_chk_final(&lfile[0], &wr_content_chk);
+
+			if (munmap(lfile, r.lfilesz))
+				exit(-1);
+			lfile = MAP_FAILED;
+			r.lfilesz = 0;
+			if (close(lfd))
+				exit(-1);
+			lfd = -1;
+
+			if (muxfs_lfile_ancestors_recompute(wr_desc
+			    ->content_checksum, lfile_fd, alg, st->st_ino,
+			    args->offset, r.blk_index_begin, r.blk_index_end))
+				goto out;
+			break;
+		}
+		r.byte_begin = prewr_sz;
+		r.byte_end = args->offset;
+		muxfs_range_compute(&r, chksz);
+
+		if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_WRONLY))
+			goto out;
+		if ((lfile = mmap(NULL, r.lfilesz, PROT_WRITE, MAP_SHARED, lfd,
+		    r.lfileoff)) == MAP_FAILED)
+			goto out;
+
+		for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+			i_offset = i * blksz;
+			off = 0;
+			if (i_offset < prewr_sz) {
+				beginsz = prewr_sz - i_offset;
+				if (beginsz > blksz)
+					beginsz = blksz;
+				if (pread(fd, content_buf, beginsz, i_offset)
+				    != beginsz) {
+					rc = MUXFS_EFS;
+					goto out;
+				}
+				off += beginsz;
+			}
+			if (off < blksz) {
+				padsz = args->offset - (i_offset + off);
+				if (off + padsz > blksz)
+					padsz = blksz - off;
+				memset(&content_buf[off], 0, padsz);
+				off += padsz;
+			}
+			muxfs_chk_init(&wr_content_chk, alg);
+			muxfs_chk_update(&wr_content_chk, content_buf, off);
+			muxfs_chk_final(&lfile[chksz * (i -
+			    r.blk_index_begin)], &wr_content_chk);
+		}
+
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+		lfile = MAP_FAILED;
+		r.lfilesz = 0;
+		if (close(lfd))
+			exit(-1);
+		lfd = -1;
+
+		if (muxfs_lfile_ancestors_recompute(wr_desc->content_checksum,
+		    lfile_fd, alg, st->st_ino, args->offset, r.blk_index_begin,
+		    r.blk_index_end))
+			goto out;
+		break;
+	default:
+		exit(-1); /* Unreachable. */
 	}
 
 	if (ftruncate(fd, args->offset)) {
 		rc = MUXFS_EFS;
-		goto out3;
+		goto out;
 	}
 
-	muxfs_chk_init(&wr_content_chk, alg);
-	muxfs_chk_update(&wr_content_chk, content_buf, args->offset);
-	muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
-	memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum,
-	    chksz);
-	
+	wr_desc->size = args->offset;
+
 	rc = 0;
-out3:
-	if (muxfs_dspop(content_buf))
-		exit(-1);
-/*out2:*/
-	if (close(fd))
-		exit(-1);
 out:
+	if (fd != -1) {
+		if (close(fd))
+			exit(-1);
+	}
 	return rc;
 }
 
@@ -1049,16 +1343,30 @@ static int
 muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
     enum muxfs_chk_alg_type alg, size_t chksz, struct stat *st,
     struct muxfs_meta *prewr_meta, struct muxfs_meta *wr_meta,
-    struct muxfs_desc *wr_desc, int *err)
+    struct muxfs_desc *wr_desc, int *err, int lfile_fd)
 {
 	int rc;
 	int fd;
-	uint8_t *content_buf;
-	size_t prewr_sz, wrsz, largest_sz;
+	uint8_t content_buf[MUXFS_BLOCK_SIZE];
+	size_t prewr_sz, wrub, largest_sz;
 
 	struct muxfs_chk	prewr_content_chk;
 	uint8_t			prewr_content_sum[MUXFS_CHKSZ_MAX];
 	struct muxfs_chk	wr_content_chk;
+
+	struct muxfs_range r;
+	size_t rdsz, i_offset, wroff, off, beginsz, padsz, wrsz, endsz;
+	uint64_t i;
+	int lfd;
+	uint8_t *lfile;
+
+	const size_t blksz = MUXFS_BLOCK_SIZE;
+
+	rc = MUXFS_EINT;
+	fd = -1;
+	lfd = -1;
+	lfile = MAP_FAILED;
+	r.lfilesz = 0;
 
 	muxfs_eids_set();
 	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
@@ -1070,45 +1378,205 @@ muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
 	}
 
 	largest_sz = prewr_sz = st->st_size;
-	wrsz = (args->offset + args->bufsz);
-	if (wrsz > largest_sz)
-		largest_sz = wrsz;
+	wrub = (args->offset + args->bufsz);
+	if (wrub > largest_sz)
+		largest_sz = wrub;
 
-	if (muxfs_dspush((void **)&content_buf, largest_sz))
-		exit(-1);
+	if (prewr_sz <= blksz) {
+		/*
+		 * This memset is necessary since 'content_buf' is used at the
+		 * write stage and the write may begin beyond the end of the
+		 * current file size, in which case the file content will be
+		 * padded with zeroes and this must be accounted for when
+		 * computing the checksum.
+		 */
+		memset(content_buf, 0, blksz);
 
-	if (read(fd, content_buf, prewr_sz) != prewr_sz) {
-		rc = MUXFS_EFS;
-		goto out3;
-	}
-	muxfs_chk_init(&prewr_content_chk, alg);
-	muxfs_chk_update(&prewr_content_chk, content_buf, prewr_sz);
-	muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
-	if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz], chksz)
-	    != 0) {
-		rc = MUXFS_ECHK;
-		goto out3;
-	}
-
-	memcpy(content_buf + args->offset, args->buf, args->bufsz);
-	if (pwrite(fd, args->buf, args->bufsz, args->offset) != args->bufsz) {
-		rc = MUXFS_EFS;
-		goto out3;
-	}
-
-	muxfs_chk_init(&wr_content_chk, alg);
-	muxfs_chk_update(&wr_content_chk, content_buf, largest_sz);
-	muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
-	memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum, chksz);
+		if (read(fd, content_buf, prewr_sz) != prewr_sz) {
+			rc = MUXFS_EFS;
+			goto out;
+		}
+		muxfs_chk_init(&prewr_content_chk, alg);
+		muxfs_chk_update(&prewr_content_chk, content_buf, prewr_sz);
+		muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
+		if (bcmp(prewr_content_sum, &prewr_meta->checksums[chksz],
+		    chksz) != 0) {
+			rc = MUXFS_ECHK;
+			goto out;
+		}
+	} else if (args->offset < prewr_sz) {
+		r.byte_begin = args->offset;
+		r.byte_end = args->offset + args->bufsz;
+		if (r.byte_end > prewr_sz)
+			r.byte_end = prewr_sz;
+		muxfs_range_compute(&r, chksz);
 	
+		if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_RDONLY))
+			goto out;
+		if ((lfile = mmap(NULL, r.lfilesz, PROT_READ, MAP_SHARED, lfd,
+		    r.lfileoff)) == MAP_FAILED)
+			goto out;
+	
+		for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+			i_offset = i * blksz;
+			rdsz = blksz;
+			if (i_offset + rdsz > prewr_sz)
+				rdsz = prewr_sz - i_offset;
+			if (pread(fd, content_buf, rdsz, i_offset) != rdsz) {
+				rc = MUXFS_EFS;
+				goto out;
+			}
+			muxfs_chk_init(&prewr_content_chk, alg);
+			muxfs_chk_update(&prewr_content_chk, content_buf, rdsz);
+			muxfs_chk_final(prewr_content_sum, &prewr_content_chk);
+			if (bcmp(prewr_content_sum, &lfile[chksz * (i -
+			    r.blk_index_begin)], chksz) != 0) {
+				rc = MUXFS_ECHK;
+				goto out;
+			}
+		}
+
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+		lfile = MAP_FAILED;
+		r.lfilesz = 0;
+		if (close(lfd))
+			exit(-1);
+		lfd = -1;
+	}
+
+	if ((prewr_sz <= blksz) && (wrub > blksz)) {
+		if (muxfs_lfile_create(lfile_fd, chksz, st->st_ino, wrub))
+			goto out;
+	}
+
+	if (largest_sz <= blksz) {
+		memcpy(&content_buf[args->offset], args->buf, args->bufsz);
+		if (pwrite(fd, args->buf, args->bufsz, args->offset) !=
+		    args->bufsz) {
+			rc = MUXFS_EFS;
+			goto out;
+		}
+
+		muxfs_chk_init(&wr_content_chk, alg);
+		muxfs_chk_update(&wr_content_chk, content_buf, largest_sz);
+		muxfs_chk_final(wr_desc->content_checksum, &wr_content_chk);
+		memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum,
+		    chksz);
+	} else {
+		if ((prewr_sz > blksz) && (wrub > prewr_sz)) {
+			if (muxfs_lfile_resize(lfile_fd, chksz, st->st_ino,
+			    prewr_sz, wrub))
+				goto out;
+		}
+
+		r.byte_begin = args->offset;
+		if (prewr_sz < r.byte_begin)
+			r.byte_begin = prewr_sz;
+		r.byte_end = args->offset + args->bufsz;
+		muxfs_range_compute(&r, chksz);
+
+		if (muxfs_lfile_open(&lfd, lfile_fd, st->st_ino, O_WRONLY))
+			goto out;
+		if ((lfile = mmap(NULL, r.lfilesz, PROT_WRITE, MAP_SHARED, lfd,
+		    r.lfileoff)) == MAP_FAILED)
+			goto out;
+	
+		wroff = 0;
+
+		for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+			i_offset = i * blksz;
+			off = 0;
+			if (i_offset < args->offset) {
+				if (i_offset < prewr_sz) {
+					beginsz = prewr_sz - i_offset;
+					if (beginsz > blksz)
+						beginsz = blksz;
+					if (pread(fd, content_buf, beginsz,
+					    i_offset) != beginsz) {
+						rc = MUXFS_EFS;
+						goto out;
+					}
+					off += beginsz;
+				}
+				if ((off < blksz) && (prewr_sz <
+				    args->offset)) {
+					padsz = args->offset - (i_offset + off);
+					if (off + padsz > blksz)
+						padsz = blksz - off;
+					memset(&content_buf[off], 0, padsz);
+					off += padsz;
+				}
+			}
+			if (off < blksz) {
+				wrsz = wrub - (i_offset + off);
+				if (off + wrsz > blksz)
+					wrsz = blksz - off;
+				memcpy(&content_buf[off], &args->buf[wroff],
+				    wrsz);
+				wroff += wrsz;
+				off += wrsz;
+			}
+			if (off < blksz) {
+				endsz = largest_sz - (i_offset + off);
+				if (off + endsz > blksz)
+					endsz = blksz - off;
+				if (pread(fd, &content_buf[off], endsz,
+				    i_offset + off) != endsz) {
+					rc = MUXFS_EFS;
+					goto out;
+				}
+				off += endsz;
+			}
+
+			if (pwrite(fd, content_buf, off, i_offset) != off) {
+				rc = MUXFS_EFS;
+				goto out;
+			}
+
+			muxfs_chk_init(&wr_content_chk, alg);
+			muxfs_chk_update(&wr_content_chk, content_buf, off);
+			muxfs_chk_final(&lfile[chksz * (i -
+			    r.blk_index_begin)], &wr_content_chk);
+		}
+
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+		lfile = MAP_FAILED;
+		r.lfilesz = 0;
+		if (fsync(lfd))
+			exit(-1);
+		if (close(lfd))
+			exit(-1);
+		lfd = -1;
+
+		if (muxfs_lfile_ancestors_recompute(wr_desc->content_checksum,
+		    lfile_fd, alg, st->st_ino, largest_sz, r.blk_index_begin,
+		    r.blk_index_end))
+			goto out;
+		memcpy(&wr_meta->checksums[chksz], wr_desc->content_checksum,
+		    chksz);
+	}
+
+	wr_desc->size = largest_sz;
+
 	rc = 0;
-out3:
-	if (muxfs_dspop(content_buf))
-		exit(-1);
-/*out2:*/
-	if (close(fd))
-		exit(-1);
 out:
+	if (lfile != MAP_FAILED) {
+		if (r.lfilesz == 0)
+			exit(-1); /* Programming error. */
+		if (munmap(lfile, r.lfilesz))
+			exit(-1);
+	} else if (r.lfilesz != 0)
+		exit(-1); /* Programming error. */
+	if (lfd != -1) {
+		if (close(lfd))
+			exit(-1);
+	}
+	if (fd != -1) {
+		if (close(fd))
+			exit(-1);
+	}
 	return rc;
 }
 
@@ -1132,6 +1600,8 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 	uint8_t			 prewr_meta_chk_buf[MUXFS_CHKSZ_MAX];
 	struct muxfs_desc	 wr_desc;
 	struct muxfs_meta	 wr_meta;
+
+	size_t			 mod_begin, mod_end, mod_size;
 
 	struct muxfs_cud	 cud;
 
@@ -1185,7 +1655,7 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 			muxfs_eids_reset();
 			if (subrc)
 				subrc = MUXFS_EFS;
-			wr_desc.perms = (prewr_desc.perms & S_IFMT) |
+			wr_desc.mode = (prewr_desc.mode & S_IFMT) |
 			    ((~S_IFMT) & args->mode);
 			break;
 		case MUXFS_UT_CHOWN:
@@ -1211,16 +1681,14 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 				subrc = MUXFS_EFS;
 			break;
 		case MUXFS_UT_TRUNCATE:
-			muxfs_eids_set();
 			subrc = muxfs_truncate_inner(fd, args, alg, chksz,
-			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err);
-			muxfs_eids_reset();
+			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc,
+			    &err, dev->lfile_fd);
 			break;
 		case MUXFS_UT_WRITE:
-			muxfs_eids_set();
 			subrc = muxfs_write_inner(fd, args, alg, chksz,
-			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err);
-			muxfs_eids_reset();
+			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err,
+			    dev->lfile_fd);
 			break;
 		default:
 			exit(-1); /* Programming error. */
@@ -1252,9 +1720,53 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 			exit(-1);
 		if (fsync(dev->meta_fd))
 			exit(-1);
-	
-		if (muxfs_readback(i, args->path, &wr_meta))
-			goto fail;
+
+		switch (args->type) {
+		case MUXFS_UT_TRUNCATE:
+			mod_end = args->offset;
+			if (args->offset <= prewr_st.st_size) {
+				mod_begin = args->offset;
+				if (mod_begin > 1)
+					--mod_begin;
+			} else
+				mod_begin = prewr_st.st_size;
+			mod_size = mod_end;
+			if (mod_size > MUXFS_BLOCK_SIZE) {
+				if (muxfs_lfile_readback(NULL, i, args->path,
+				    mod_begin, mod_end,
+				    &wr_meta.checksums[chksz]))
+					goto fail;
+				if (muxfs_readback(i, args->path, 1, &wr_meta))
+					goto fail;
+			} else {
+				if (muxfs_readback(i, args->path, 0, &wr_meta))
+					goto fail;
+			}
+			break;
+		case MUXFS_UT_WRITE:
+			mod_begin = args->offset;
+			if (mod_begin > prewr_st.st_size)
+				mod_begin = prewr_st.st_size;
+			mod_end = args->offset + args->bufsz;
+			mod_size = mod_end;
+			if (mod_size < prewr_st.st_size)
+				mod_size = prewr_st.st_size;
+			if (mod_size > MUXFS_BLOCK_SIZE) {
+				if (muxfs_lfile_readback(NULL, i, args->path,
+				    mod_begin, mod_end,
+				    &wr_meta.checksums[chksz]))
+					goto fail;
+				if (muxfs_readback(i, args->path, 1, &wr_meta))
+					goto fail;
+			} else {
+				if (muxfs_readback(i, args->path, 0, &wr_meta))
+					goto fail;
+			}
+			break;
+		default:
+			if (muxfs_readback(i, args->path, 1, &wr_meta))
+				goto fail;
+		}
 
 		cud.type = MUXFS_CUD_UPDATE;
 		cud.path = args->path;
@@ -1388,7 +1900,7 @@ muxfs_rename(const char *from, const char *to)
 		 */
 		if (renameat(fd, ".muxfs/rename.tmp", fd, to))
 			goto fail;
-		if (muxfs_readback(i, to, &prewr_meta))
+		if (muxfs_readback(i, to, 0, &prewr_meta))
 			goto fail;
 		cud.type = MUXFS_CUD_CREATE;
 		cud.path = to;
@@ -1505,8 +2017,6 @@ muxfs_fuse_ops = {
 	.destroy     = muxfs_destroy    ,
 	/* No-ops */
 	.fsync       = muxfs_fsync      ,
-	.open        = muxfs_open       ,
-	.opendir     = muxfs_opendir    ,
 	.flush       = muxfs_flush      ,
 	.release     = muxfs_release    ,
 	.releasedir  = muxfs_releasedir ,
@@ -1515,6 +2025,8 @@ muxfs_fuse_ops = {
 	.mkdir       = muxfs_mkdir      ,
 	.symlink     = muxfs_symlink    ,
 	/* Read */
+	.open        = muxfs_open       ,
+	.opendir     = muxfs_opendir    ,
 	.getattr     = muxfs_getattr    ,
 	.read        = muxfs_read       ,
 	.readlink    = muxfs_readlink   ,

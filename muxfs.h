@@ -18,6 +18,7 @@
 #ifndef _MUXFS_H_
 #define _MUXFS_H_
 
+#include <sys/syslimits.h>
 #include <sys/types.h>
 
 struct dirent;
@@ -69,7 +70,6 @@ struct muxfs_version {
 struct muxfs_dev_conf {
 	struct	muxfs_version version;
 	enum	muxfs_chk_alg_type chk_alg_type;
-	int	sign;
 
 	/* UUIDs are encoded as binary, little-endian. */
 	uint8_t	uuid[MUXFS_UUID_SIZE];
@@ -103,7 +103,8 @@ struct muxfs_dev {
 	int		 root_fd,
 			 state_fd,
 			 meta_fd,
-			 assign_fd;
+			 assign_fd,
+			 lfile_fd;
 	const char	*root_path;
 	struct		 muxfs_dev_conf conf;
 	int		 attached_now,
@@ -173,7 +174,8 @@ struct muxfs_desc {
 	muxfs_desc_type	type;
 	uint64_t	owner;
 	uint64_t	group;
-	uint64_t	perms;
+	uint64_t	mode;
+	uint64_t	size;
 	uint8_t		content_checksum[MUXFS_CHKSZ_MAX];
 };
 MUXFS int  muxfs_desc_type_from_mode(muxfs_desc_type *, mode_t);
@@ -181,12 +183,37 @@ MUXFS int  muxfs_desc_init_from_stat(struct muxfs_desc *, struct stat *,
     uint64_t);
 MUXFS void muxfs_desc_chk_provided_content(struct muxfs_desc *, const uint8_t *,
     size_t, enum muxfs_chk_alg_type);
-MUXFS int  muxfs_desc_chk_file_content(struct muxfs_desc *, dind, int);
+MUXFS int  muxfs_desc_chk_reg_content(struct muxfs_desc *, dind, const char *);
 MUXFS int  muxfs_desc_chk_symlink_content(struct muxfs_desc *, dind,
     const char *);
 MUXFS int  muxfs_desc_chk_node_content(struct muxfs_desc *, dind, const char *);
 MUXFS void muxfs_desc_chk_meta(uint8_t *, const struct muxfs_desc *,
     enum muxfs_chk_alg_type);
+
+/* lfile.c */
+struct muxfs_range {
+	size_t		byte_begin,
+			byte_end,
+			blk_begin,
+			blk_end,
+			lfilesz,
+			lfileoff;
+	uint64_t	blk_index_begin,
+			blk_index_end;
+};
+MUXFS void muxfs_range_compute(struct muxfs_range *, size_t);
+MUXFS int muxfs_lfile_abs_range(uint64_t *, uint64_t *, uint64_t, uint64_t);
+MUXFS uint64_t muxfs_lfile_root_level(uint64_t);
+MUXFS uint64_t muxfs_lfile_root_abs_index(uint64_t);
+MUXFS int muxfs_lfile_open(int *, int, ino_t, int);
+MUXFS int muxfs_lfile_create(int, size_t, ino_t, size_t);
+MUXFS int muxfs_lfile_resize(int, size_t, ino_t, size_t, size_t);
+MUXFS int muxfs_lfile_exists(int *, int, ino_t);
+MUXFS int muxfs_lfile_delete(int, ino_t);
+MUXFS int muxfs_lfile_ancestors_recompute(uint8_t *, int,
+    enum muxfs_chk_alg_type, ino_t, size_t, uint64_t, uint64_t);
+MUXFS int muxfs_lfile_readback(uint8_t *, dind, const char *, size_t, size_t,
+    const uint8_t *);
 
 /* state.c */
 MUXFS int  muxfs_state_syslog_init(void);
@@ -222,17 +249,31 @@ struct muxfs_dir {
 	struct dirent **ent_array;
 	size_t ent_count;
 };
+struct muxfs_args {
+	char	mp_path[PATH_MAX];
+	char	dev_paths[MUXFS_DEV_COUNT_MAX][PATH_MAX];
+	size_t	dev_count;
+	int f;
+	int a;
+};
+extern struct muxfs_args muxfs_cmdline;
+MUXFS int muxfs_parse_args(int, char **, int);
+MUXFS void muxfs_mount_usage(void);
+MUXFS void muxfs_fsck_usage(void);
+MUXFS int muxfs_existsat(int *, int , const char *);
 MUXFS int muxfs_path_sanitize(const char **);
 MUXFS int muxfs_path_pop(const char **, char *, size_t *);
 MUXFS int muxfs_pushdir(struct muxfs_dir *, int, const char *);
 MUXFS int muxfs_popdir(struct muxfs_dir *);
-MUXFS int muxfs_readback(dind, const char *, struct muxfs_meta *);
+MUXFS int muxfs_readback(dind, const char *, int, const struct muxfs_meta *);
 MUXFS int muxfs_parent_readback(dind, const char *);
 MUXFS int muxfs_ancestors_meta_recompute(dind, struct muxfs_cud *);
 MUXFS int muxfs_dir_meta_recompute(struct muxfs_cud *, dind,
     const struct muxfs_cud *);
 MUXFS int muxfs_parent_gid(gid_t *, const char *);
 MUXFS int muxfs_dir_content_chk(uint8_t *, dind, struct muxfs_dir *);
+MUXFS size_t muxfs_align_up(size_t, size_t);
+MUXFS size_t muxfs_align_down(size_t, size_t);
 
 /* version.c */
 extern struct muxfs_version muxfs_program_version;

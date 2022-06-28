@@ -63,23 +63,17 @@ struct ds {
 
 static int muxfs_ds_add_pages(size_t);
 
-static size_t
-muxfs_ds_align(size_t s, size_t a)
-{
-	return a * ((s / a) + ((s % a) ?  1 : 0));
-}
-
 MUXFS int
 muxfs_dspush(void **p, size_t sz)
 {
 	struct ds *n;
 	size_t s;
 
-	sz = muxfs_ds_align(sz, muxfs_ds_memalign);
+	sz = muxfs_align_up(sz, muxfs_ds_memalign);
 
 	n = SLIST_FIRST(&muxfs_ds_head);
 	if (n->allocend + sz >= n->end) {
-		s = muxfs_ds_align(sz + muxfs_ds_offset, muxfs_ds_pagesz) /
+		s = muxfs_align_up(sz + muxfs_ds_offset, muxfs_ds_pagesz) /
 		    muxfs_ds_pagesz;
 		if (s < (muxfs_ds_max_pagecount - muxfs_ds_total_pagecount))
 			s = (muxfs_ds_max_pagecount - muxfs_ds_total_pagecount);
@@ -139,7 +133,7 @@ muxfs_dsgrow(void **p_inout, size_t sz)
 	size_t ssz, dsz;
 
 	sp = (uint8_t *)*p_inout;
-	sz = muxfs_ds_align(sz, muxfs_ds_memalign);
+	sz = muxfs_align_up(sz, muxfs_ds_memalign);
 
 	n = SLIST_FIRST(&muxfs_ds_head);
 	if ((n->begin < sp) || (sp >= n->allocend))
@@ -190,7 +184,7 @@ muxfs_ds_add_pages(size_t pagecount)
 MUXFS int
 muxfs_dsinit(void)
 {
-	muxfs_ds_offset = muxfs_ds_align(sizeof(struct ds), muxfs_ds_memalign);
+	muxfs_ds_offset = muxfs_align_up(sizeof(struct ds), muxfs_ds_memalign);
 	muxfs_ds_pagesz = sysconf(_SC_PAGESIZE);
 	if (muxfs_ds_offset >= muxfs_ds_pagesz)
 		return 1;

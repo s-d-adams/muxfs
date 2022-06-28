@@ -14,6 +14,10 @@ dev_a=
 # The path for the second 'dev' in the array.
 dev_b=
 
+# A directory outside of the mount-point and the 'dev's used to store temporary
+# files.
+test_tmp=
+
 # An unprivileged user that may be used for running tests (must be able to su
 # to it without password).  Also used to test chown.
 unpriv_user=

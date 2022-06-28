@@ -36,12 +36,13 @@ static const char *sepmuxfsdotconf = "/muxfs.conf";
 static const char *sepstatedotdb = "/state.db";
 static const char *sepmetadotdb = "/meta.db";
 static const char *sepassigndotdb = "/assign.db";
+static const char *seplfile = "/lfile";
 
 static void
 muxfs_newfs_usage(void)
 {
-	fprintf(stderr, "Incorrect usage.\n");
-	exit(-1);
+	fprintf(stderr, "usage: newfs_muxfs [-a checksum_algorithm ] "
+	    "[[-d directory ] ...]\n");
 }
 
 static int
@@ -79,7 +80,7 @@ muxfs_dir_is_empty(int *empty_out, char const *path)
 int
 main(int argc, char *argv[])
 {
-	int rc, c, sign;
+	int rc, c;
 	enum muxfs_chk_alg_type alg;
 	char dev_roots[MUXFS_DEV_COUNT_MAX][PATH_MAX];
 	char path_buf[PATH_MAX];
@@ -104,13 +105,12 @@ main(int argc, char *argv[])
 		return -1;
 
 	rc = 1;
-	sign = 0;
 	alg = CAT_MD5;
 	memset(dev_roots, 0, MUXFS_DEV_COUNT_MAX * PATH_MAX);
 	dev_root_count = 0;
 
 	c = 0;
-	while ((c = getopt(argc, argv, "a:d:s")) != -1) {
+	while ((c = getopt(argc, argv, "a:d:")) != -1) {
 		switch (c) {
 		case 'a':
 			if (muxfs_chk_str_to_type(&alg, optarg,
@@ -123,21 +123,13 @@ main(int argc, char *argv[])
 				goto out;
 			memcpy(dev_roots[dev_root_count++], optarg, len);
 			break;
-		case 's':
-			sign = 1;
-			break;
 		default:
 			muxfs_newfs_usage();
+			exit(-1);
 		}
 	}
 	argc -= optind;
 	argv += optind;
-
-	if (sign && (alg != CAT_SHA1)) {
-		fprintf(stderr, "Error: Signing requested with "
-		    "cryptographically weak hash algorithm.\n");
-		goto out;
-	}
 
 	empty = 0;
 	for (i = 0; i < dev_root_count; ++i) {
@@ -163,7 +155,6 @@ main(int argc, char *argv[])
 		confs[i] = (struct muxfs_dev_conf) {
 			.version = muxfs_program_version,
 			.chk_alg_type = alg,
-			.sign = sign,
 			.expected_array_count = dev_root_count,
 			.seq_zero_time = now,
 		};
@@ -276,6 +267,16 @@ main(int argc, char *argv[])
 		}
 		if (close(fd))
 			exit(-1);
+
+		if (strlen(dev_roots[i]) + strlen(sepdotmuxfs) +
+		    strlen(seplfile) >= PATH_MAX)
+			goto out;
+		memset(path_buf, 0, PATH_MAX);
+		strcat(path_buf, dev_roots[i]);
+		strcat(path_buf, sepdotmuxfs);
+		strcat(path_buf, seplfile);
+		if (mkdir(path_buf, 0700))
+			goto out;
 	}
 
 	rc = 0;

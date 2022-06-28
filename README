@@ -10,10 +10,10 @@ LEAD TO LOSS OF DATA.
 
 Introduction
 ------------
-muxfs is an experimental mirroring and checksumming filesystem layer for
-OpenBSD.  It mirrors the filesystem tree at the mount point to a series of
-user-selected directories, and employs a checksum database to validate and
-restore files in realtime.
+muxfs is an experimental mirroring, checksumming, and self-healing filesystem
+layer for OpenBSD.  It mirrors its filesystem tree across a series of
+user-selected directories, and employs checksum databases to validate and
+restore files automatically.
 
 Installation
 ------------
@@ -22,13 +22,75 @@ Installation
 
 Usage
 -----
-1. Create a directory array.  With empty, non-overlapping directories:
+1. Create a directory array.
+
+   With empty, non-overlapping directories:
+
 	# newfs_muxfs -d /path/to/dir/1 -d /path/to/dir/2 ...
-2. Mount the array.
+
+   By default the MD5 checksum algorithm is used.  To select the checksum
+   algorithm use the -a alg option, where alg is either crc32, md5, or sha1:
+
+	# newfs_muxfs -a sha1 -d /path/to/dir/1 -d /path/to/dir/2 ...
+
+2. Mount the array:
+
 	# mount_muxfs /path/to/dir/1 /path/to/dir/2 ... /path/to/mount/point
+
 3. Edit the tree at the mount point.
-4. Unmount the array.
+
+   Files that are found to be corrupted upon access will automatically be
+   scheduled for restoration.
+
+4. Unmount the array:
+
 	# umount /path/to/mount/point
+
+5. (Optional) Manually audit or restore the array.
+
+   First ensure that the array is not mounted.
+
+   By default fsck_muxfs will attempt to restore the corrupted files it finds.
+   The output of fsck_muxfs is the full path of each file found to be corrupted
+   separated by newlines:
+
+	# fsck_muxfs /path/to/dir/1 /path/to/dir/2 ...
+	/path/to/dir/1/found/corrupted/file/1
+	/path/to/dir/1/found/corrupted/file/2
+	...
+	/path/to/dir/2/found/corrupted/file/3
+	/path/to/dir/2/found/corrupted/file/4
+	...
+
+   To audit only, without restoration attempts, add the -a flag:
+
+	# fsck_muxfs -a /path/to/dir/1 /path/to/dir/2 ...
+	/path/to/dir/1/found/corrupted/file/1
+	/path/to/dir/1/found/corrupted/file/2
+	...
+	/path/to/dir/2/found/corrupted/file/3
+	/path/to/dir/2/found/corrupted/file/4
+	...
+
+6. (Optional) Monitor corruptions and restoration attempts.
+
+   Both automatically and manually discovered corruptions and attempted
+   restorations are logged via syslog.  The directories in the array each have
+   an index, starting at zero, corresponding to the order in which they were
+   specified to newfs_muxfs.  This index, followed by a colon, is prefixed to
+   the paths of files referenced in the log:
+
+	# tail /var/log/messages
+	DATE HOSTNAME muxfs[PID]: Corrupted: 0:/found/corrupted/1
+	DATE HOSTNAME muxfs[PID]: Restored: 0:/found/corrupted/1
+	DATE HOSTNAME muxfs[PID]: Corrupted: 0:/found/corrupted/2
+	DATE HOSTNAME muxfs[PID]: Restored: 0:/found/corrupted/2
+	...
+	DATE HOSTNAME muxfs[PID]: Corrupted: 1:/found/corrupted/3
+	DATE HOSTNAME muxfs[PID]: Restored: 1:/found/corrupted/3
+	DATE HOSTNAME muxfs[PID]: Corrupted: 1:/found/corrupted/4
+	DATE HOSTNAME muxfs[PID]: Restored: 1:/found/corrupted/4
+	...
 
 Recommendations
 ---------------
@@ -42,12 +104,16 @@ Please send bug, usability, and performance reports to
 copyrights are assigned to Stephen D Adams.
 
 If you want to read the code then I advise that you first look at GLOSSARY,
-then muxfs.h, then progress to the rest of the code.  If you want to test a
-patch then I advise that you edit Makefile commenting out the 'unity' target
-and uncommenting the 'incremental' target; this may increase build time and
-binary size but will produce clearer compiler error messages.  To run
-mount_muxfs under a debugger you will need to uncomment either the '-f' line or
-the '-odebug' line from mount_muxfs.c (see fuse_parse_cmdline(3) for details).
+then muxfs.h before progressing to the rest of the code.
+
+If you want to test a patch then I advise that you edit Makefile commenting out
+the 'unity' target and uncommenting the 'incremental' target; this should
+produce clearer compiler error messages.
+
+In addition to 'incremental' to run mount_muxfs under a debugger you will need
+to edit the makefile commenting out the '-O2' CFLAGS line and uncommenting the
+'-g' CFLAGS line, then pass the '-f' flag to mount_muxfs (see
+fuse_parse_cmdline(3) for details).
 
 Author
 ------

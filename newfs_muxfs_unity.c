@@ -15,24 +15,16 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * So long as all symbols at file scope are uniquely named and the total size
- * of the codebase fits within the system memory the whole-program-from-clean
- * build time can be reduced using a "unity build" whereby all modules are
- * concatenated into a single module.  Unity builds also give the compiler more
- * information with which to optimize the program.  Run "make unity" to conduct
- * a unity build of newfs_muxfs.
- */
-
 #include "chk.c"
 #include "conf.c"
 #include "desc.c"
 #include "dev.c"
-#if MUXFS_DS == 1
-#include "ds.c"
-#else
+#if MUXFS_DS_MALLOC == 1
 #include "ds_malloc.c"
+#else
+#include "ds.c"
 #endif
+#include "lfile.c"
 #include "state.c"
 #include "util.c"
 #include "version.c"

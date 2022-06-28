@@ -7,7 +7,7 @@ cud	Create, Update, Delete; a categorization of write operations.
 comp	Component.
 conf	Configuration.
 d	Destination; typically the target 'dev' for a write operation.
-desc	Descriptor, relating to file descriptors; more specifically a
+desc	Description; relating to file metadata.  More specifically a
 	description of an inode and its relevant metadata, including a checksum
 	of the file content.  Metadata checksums are produced from these
 	descriptions.
@@ -15,6 +15,7 @@ dev	Device; not a block device but a directory used internally by muxfs to
 	store persistent data.  Muxfs mirrors data across an array of 'dev's.
 dind	Device index; ranging from zero to the number of 'dev's minus one.
 	Also used as the type for counting 'dev's.
+dir	Directory.
 ds	Dynamic stack.  Read ds.h for more information.
 eno	An "external" inode number, exposed to through FUSE to the user via
 	stat(2).  See also 'use_ino' in fuse_new(3).
@@ -22,19 +23,37 @@ ent	Entry; as in directory entry.
 gen	Generate.  Read gen.c for more information.
 ino	An "internal" inode number specific to one 'dev', hidden from the user.
 inout	In-Out; a parameter to a function that is both an input and an output.
+lfile	Large file; pertaining to files larger than MUXFS_BLOCK_SIZE, and their
+	corresponding checksums.
 lnk	Link; typically a symlink.
 mnt(s)	Mount(s).
 mp	Mount-point.
 mt	Multi-threaded.
 muxfs	The Multiplexed File System.
+node	A file of any type.  This term is used to make clear that the "file" is
+	not necessarily a regular file.  More generally an element of a tree
+	structure.
+off	Offset.
 op(s)	Operation(s).
-p	Parent; as in parent directory.
+p	Parent; as in parent directory.  More generally a node "one step
+	higher" in a tree structure.
 rc	Return code; typically an int that is zero upon successful return from
 	a function.
 rd	Read.
+reg	Regular file.
 s	Source; typically the information source 'dev' of a restore operation.
 sep	Separator; the '/' that separates files and directories in paths.
 seq	Sequence number.
 sz	Size; a number of bytes.
-unity	A unity build.  Read mount_muxfs_unity.c for more information.
+tx	Transfer.
+ub	Upper bound.
+unity	A unity build is a compilation technique whereby all modules are
+	concatenated into a single module.  Unity builds provide the compiler
+	with more information with which to optimize the program, and can
+	increase the speed of compilation of individual programs from clean.
+	By contrast an incremental build may compile a suite of programs faster
+	if the programs share some of their modules.  Incremental builds tend
+	to provide clearer debugging information, may compile faster when
+	updating a previous incremental build, and tend to result in less
+	optimized programs.
 wr	Write.

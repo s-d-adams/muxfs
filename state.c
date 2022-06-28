@@ -24,7 +24,6 @@
 #include <syslog.h>
 #include <unistd.h>
 
-#include "debug.h"
 #include "muxfs.h"
 
 struct muxfs_restore_item {
@@ -72,7 +71,6 @@ muxfs_state_restore_push_back(dind dev_index, const char *path)
 		*qsz *= 2;
 		if ((*q = realloc(*q, *qsz)) == NULL)
 			exit(-1);
-		debug("Restore queue resized: %lu\n", *qsz);
 	}
 
 	curr->dev_index = dev_index;
@@ -115,7 +113,6 @@ muxfs_state_restore_pop_front(size_t *dev_index_out, char *path_out)
 	*dev_index_out = curr->dev_index;
 	memcpy(path_out, curr->path, curr->path_len);
 	path_out[curr->path_len] = '\0';
-	debug("Restore pop: %lu:/%s\n", *dev_index_out, path_out);
 
 	muxfs_global_state.front = next;
 
@@ -132,7 +129,6 @@ muxfs_state_restore_pop_front(size_t *dev_index_out, char *path_out)
 		memmove(*u8queue, *u8front, used);
 		(*u8front) = *u8queue;
 		(*u8back) -= offset;
-		debug("Restore queue moved back\n");
 	}
 
 	return 0;

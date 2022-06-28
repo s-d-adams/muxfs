@@ -23,16 +23,18 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "debug.h"
 #include "ds.h"
 #include "muxfs.h"
 #include "gen.h"
 
-static int muxfs_restore_file(dind, dind, const char *, int, struct stat *,
+struct muxfs_args muxfs_cmdline;
+
+static int muxfs_restore_reg(dind, dind, const char *, int, struct stat *,
     struct muxfs_meta *);
 static int muxfs_restore_symlink(dind, dind, const char *, struct stat *,
     struct muxfs_meta *);
@@ -253,7 +255,7 @@ muxfs_dir_meta_recompute(struct muxfs_cud *pcud_out, dind dev_index,
 	if (fsync(dev->meta_fd))
 		exit(-1);
 
-	if (muxfs_readback(dev_index, ccud_in->path, &post_meta))
+	if (muxfs_readback(dev_index, ccud_in->path, 0, &post_meta))
 		goto out3;
 
 	pcud_out->type = MUXFS_CUD_UPDATE;
@@ -280,14 +282,17 @@ muxfs_path_is_root(const char *path)
 }
 
 /*
- * Reads the content and metadata at 'path' in dev 'i', and computes its meta
- * checksum.  If the computed checksum does not match that in the meta.db file
- * then 1 is returned.  If 'expected' is not NULL and the computed checksum
- * does not match that in 'expected' then 1 is returned.  Otherwise 0 is
- * returned.
+ * Computes the meta checksum of 'path' in dev 'i'.  If the computed checksum
+ * does not match that in the meta.db file then 1 is returned.  Otherwise 0 is
+ * returned.  If 'shallow' is non-zero then the content checksum used to
+ * compute the meta checksum will be taken from that in the meta.db file,
+ * otherwise the content checksum will be computed from the file content.  If
+ * 'expected' is not NULL and the computed checksum does not match that in
+ * 'expected' then 1 is returned.
  */
 MUXFS int
-muxfs_readback(dind i, const char *path, struct muxfs_meta *expected)
+muxfs_readback(dind i, const char *path, int shallow,
+    const struct muxfs_meta *expected)
 {
 	struct muxfs_dev	*dev;
 	int			 root_fd;
@@ -313,8 +318,12 @@ muxfs_readback(dind i, const char *path, struct muxfs_meta *expected)
 	eno = meta.header.eno;
 	if (muxfs_desc_init_from_stat(&desc, &st, eno))
 		goto fail;
-	if (muxfs_desc_chk_node_content(&desc, i, path))
-		goto fail;
+	if (shallow)
+		memcpy(desc.content_checksum, &meta.checksums[chksz], chksz);
+	else {
+		if (muxfs_desc_chk_node_content(&desc, i, path))
+			goto fail;
+	}
 	muxfs_desc_chk_meta(meta_chk_buf, &desc, alg);
 	if (bcmp(meta_chk_buf, &meta.checksums[0], chksz) != 0)
 		goto fail;
@@ -344,7 +353,7 @@ muxfs_parent_readback(dind i, const char *path)
 		strcpy(ppath, ".");
 	}
 
-	return muxfs_readback(i, ppath, NULL);
+	return muxfs_readback(i, ppath, 0, NULL);
 }
 
 static void
@@ -483,7 +492,7 @@ muxfs_ancestors_meta_recompute(dind dev_index, struct muxfs_cud *cud)
 	return 0;
 }
 
-static int
+MUXFS int
 muxfs_existsat(int *exists_out, int fd, const char *path)
 {
 	struct stat st;
@@ -777,7 +786,7 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 			    subfd, &subst, &submeta))
 				goto subout;
 		} else if (S_ISREG(subst.st_mode)) {
-			if (muxfs_restore_file(ddev_index, sdev_index, pathbuf,
+			if (muxfs_restore_reg(ddev_index, sdev_index, pathbuf,
 			    subfd, &subst, &submeta))
 				goto subout;
 		} else if (S_ISLNK(subst.st_mode)) {
@@ -789,7 +798,7 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 				exit(-1);
 			goto subout;
 		}
-		if (muxfs_readback(ddev_index, pathbuf, &submeta))
+		if (muxfs_readback(ddev_index, pathbuf, 0, &submeta))
 			goto subout;
 		
 		if (close(subfd))
@@ -861,7 +870,38 @@ out:
 }
 
 static int
-muxfs_restore_file(dind ddev_index, dind sdev_index, const char *path,
+muxfs_copy_reg(int dfd, int sfd, size_t content_sz)
+{
+	int rc;
+	struct muxfs_range r;
+	size_t i_offset, txsz;
+	uint64_t i;
+	uint8_t content_buf[MUXFS_BLOCK_SIZE];
+
+	rc = 1;
+
+	r.byte_begin = 0;
+	r.byte_end = content_sz;
+	muxfs_range_compute(&r, 0);
+
+	for (i = r.blk_index_begin; i < r.blk_index_end; ++i) {
+		i_offset = i * MUXFS_BLOCK_SIZE;
+		txsz = MUXFS_BLOCK_SIZE;
+		if (i_offset + txsz > content_sz)
+			txsz = content_sz - i_offset;
+		if (pread(sfd, content_buf, txsz, i_offset) != txsz)
+			goto out;
+		if (pwrite(dfd, content_buf, txsz, i_offset) != txsz)
+			goto out;
+	}
+
+	rc = 0;
+out:
+	return rc;
+}
+
+static int
+muxfs_restore_reg(dind ddev_index, dind sdev_index, const char *path,
     int sfd, struct stat *sst, struct muxfs_meta *expected)
 {
 	int			 rc;
@@ -870,16 +910,20 @@ muxfs_restore_file(dind ddev_index, dind sdev_index, const char *path,
 	enum muxfs_chk_alg_type	 alg;
 	size_t			 chksz;
 	uint64_t		 eno;
-	uint8_t			*content_buf;
 	size_t			 content_sz;
-	struct muxfs_chk	 chk;
-	uint8_t			 sum[MUXFS_CHKSZ_MAX];
 	int			 dfd;
 	struct stat		 dst;
 	ino_t			 dino;
 	struct muxfs_assign	 assign;
+	struct stat		 slfile_st;
+	int			 dlfd,
+				 slfd;
+	int			 exists;
 
 	rc = 1;
+	dfd = -1;
+	dlfd = -1;
+	slfd = -1;
 
 	if (muxfs_dev_get(&ddev, ddev_index))
 		goto out;
@@ -890,40 +934,47 @@ muxfs_restore_file(dind ddev_index, dind sdev_index, const char *path,
 	eno = expected->header.eno;
 	content_sz = sst->st_size;
 
-	if (muxfs_dspush((void **)&content_buf, content_sz))
-		exit(-1);
+	if (muxfs_readback(sdev_index, path, 0, expected))
+		goto out;
 
-	if (pread(sfd, content_buf, content_sz, 0) != content_sz)
-		goto out2;
-	muxfs_chk_init(&chk, alg);
-	muxfs_chk_update(&chk, content_buf, content_sz);
-	muxfs_chk_final(sum, &chk);
-	if (bcmp(sum, &expected->checksums[chksz], chksz) != 0) {
-		if (muxfs_state_restore_push_back(sdev_index, path))
-			exit(-1);
-		goto out2;
-	}
-
-	if ((dfd = openat(ddev->root_fd, path, O_RDWR|O_CREAT|O_TRUNC,
+	if ((dfd = openat(ddev->root_fd, path, O_WRONLY|O_CREAT|O_TRUNC,
 	    sst->st_mode)) == -1)
-		goto out2;
+		goto out;
+	if (muxfs_copy_reg(dfd, sfd, content_sz))
+		goto out;
 
-	if (pwrite(dfd, content_buf, content_sz, 0) != content_sz)
-		goto out3;
 	if (fchown(dfd, sst->st_uid, sst->st_gid))
-		goto out3;
+		goto out;
 	if (fstat(dfd, &dst))
-		goto out3;
+		goto out;
 	dino = dst.st_ino;
 
+	if (muxfs_lfile_exists(&exists, ddev->lfile_fd, dino))
+		goto out;
+	if (exists && muxfs_lfile_delete(ddev->lfile_fd, dino))
+		goto out;
+	if (content_sz > MUXFS_BLOCK_SIZE) {
+		if (muxfs_lfile_create(ddev->lfile_fd, chksz, dino,
+		    content_sz))
+			goto out;
+		if (muxfs_lfile_open(&dlfd, ddev->lfile_fd, dino, O_WRONLY))
+			goto out;
+		if (muxfs_lfile_open(&slfd, sdev->lfile_fd, sst->st_ino,
+		    O_RDONLY))
+			goto out;
+		if (fstat(slfd, &slfile_st))
+			goto out;
+		if (muxfs_copy_reg(dlfd, slfd, slfile_st.st_size))
+			goto out;
+	}
+	if (muxfs_meta_write(expected, ddev_index, dino))
+		goto out;
 	assign = (struct muxfs_assign) {
 		.flags = AF_ASSIGNED,
 		.ino = dino
 	};
-	if (muxfs_meta_write(expected, ddev_index, dino))
-		goto out3;
 	if (muxfs_assign_write(&assign, ddev_index, eno))
-		goto out3;
+		goto out;
 
 	if (fsync(dfd))
 		exit(-1);
@@ -933,13 +984,19 @@ muxfs_restore_file(dind ddev_index, dind sdev_index, const char *path,
 		exit(-1);
 
 	rc = 0;
-out3:
-	if (close(dfd))
-		exit(-1);
-out2:
-	if (muxfs_dspop(content_buf))
-		exit(-1);
 out:
+	if (slfd != -1) {
+		if (close(slfd))
+			exit(-1);
+	}
+	if (dlfd != -1) {
+		if (close(dlfd))
+			exit(-1);
+	}
+	if (dfd != -1) {
+		if (close(dfd))
+			exit(-1);
+	}
 	return rc;
 }
 
@@ -1060,7 +1117,7 @@ muxfs_restore_possible_inner(int *is_delete_out, dind ddev_index,
 		rc = 3;
 		goto out;
 	}
-	if (muxfs_readback(sdev_index, ppath, NULL)) {
+	if (muxfs_readback(sdev_index, ppath, 0, NULL)) {
 		if (muxfs_state_restore_push_back(sdev_index, ppath))
 			exit(-1);
 		rc = 3;
@@ -1076,7 +1133,7 @@ muxfs_restore_possible_inner(int *is_delete_out, dind ddev_index,
 	}
 	if (exists) {
 		if (!expect_substitute) {
-			if (muxfs_readback(sdev_index, path, NULL)) {
+			if (muxfs_readback(sdev_index, path, 0, NULL)) {
 				if (muxfs_state_restore_push_back(sdev_index,
 				    path))
 					exit(-1);
@@ -1209,7 +1266,7 @@ muxfs_restore_possible(int *is_delete_out, dind ddev_index, dind sdev_index,
 	chksz = muxfs_chk_size(alg);
 
 	if (muxfs_path_is_root(path)) {
-		if (muxfs_readback(sdev_index, path, NULL)) {
+		if (muxfs_readback(sdev_index, path, 0, NULL)) {
 			if (muxfs_state_restore_push_back(sdev_index, path))
 				exit(-1);
 			return 3;
@@ -1328,7 +1385,7 @@ muxfs_restore_delete(dind ddev_index, dind sdev_index, const char *path)
 	if (exists)
 		goto out2;
 
-	if (muxfs_readback(ddev_index, ppath, &spmeta))
+	if (muxfs_readback(ddev_index, ppath, 0, &spmeta))
 		goto out2;
 
 	rc = 0;
@@ -1363,7 +1420,7 @@ muxfs_dir_meta_restore(dind ddev_index, dind sdev_index, const char *path)
 		return 1;
 	if (fsync(ddev->meta_fd))
 		exit(-1);
-	if (muxfs_readback(ddev_index, path, NULL))
+	if (muxfs_readback(ddev_index, path, 0, NULL))
 		return 1;
 	return 0;
 }
@@ -1465,7 +1522,7 @@ muxfs_restore_impl(dind ddev_index, const char *path)
 				    &sst, &smeta))
 					goto fail2;
 			} else if (S_ISREG(sst.st_mode)) {
-				if (muxfs_restore_file(ddev_index, si, path,
+				if (muxfs_restore_reg(ddev_index, si, path,
 				    sfd, &sst, &smeta))
 					goto fail2;
 			} else {
@@ -1480,7 +1537,7 @@ muxfs_restore_impl(dind ddev_index, const char *path)
 		}
 		if (muxfs_ancestors_meta_restore(ddev_index, si, path))
 			goto fail2;
-		if (muxfs_readback(ddev_index, path, &smeta))
+		if (muxfs_readback(ddev_index, path, 0, &smeta))
 			goto fail2;
 		
 		return 0;
@@ -1512,11 +1569,8 @@ muxfs_restore_now(void)
 			    ddev_index, path);
 			goto fail;
 		case 2:
-			debug("Restore deferred: %lu:/%s\n", ddev_index, path);
 			goto next;
 		case 4:
-			debug("Restore unnecessary: %lu:/%s\n", ddev_index,
-			    path);
 			goto next;
 		default:
 			exit(-1); /* Programming error. */
@@ -1608,4 +1662,66 @@ muxfs_dir_content_chk(uint8_t *sum_out, dind dev_index, struct muxfs_dir *dir)
 	rc = 0;
 out:
 	return rc;
+}
+
+MUXFS size_t
+muxfs_align_up(size_t s, size_t a)
+{
+	return a * ((s / a) + ((s % a) ?  1 : 0));
+}
+
+MUXFS size_t
+muxfs_align_down(size_t s, size_t a)
+{
+	return a * (s / a);
+}
+
+MUXFS int
+muxfs_parse_args(int argc, char **argv, int no_mp)
+{
+	int i, c;
+	size_t len;
+	struct muxfs_args *args = &muxfs_cmdline;
+	char *dest;
+
+	memset(args, 0, sizeof(*args));
+
+	c = 0;
+	while ((c = getopt(argc, argv, "af")) != -1) {
+		switch (c) {
+		case 'a':
+			args->a = 1;
+			break;
+		case 'f':
+			args->f = 1;
+			break;
+		default:
+			return 1;
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	args->dev_count = 0;
+	for (i = 0; i < argc; ++i) {
+		len = strlen(argv[i]);
+		if (len >= PATH_MAX)
+			return 1;
+		dest = (no_mp || (i < (argc - 1))) ?
+		    args->dev_paths[args->dev_count++] : args->mp_path;
+		strcpy(dest, argv[i]);
+	} 
+	return 0;
+}
+
+MUXFS void
+muxfs_mount_usage(void)
+{
+	fprintf(stderr, "usage: mount_muxfs [-f] directory ... mount_point\n");
+}
+
+MUXFS void
+muxfs_fsck_usage(void)
+{
+	fprintf(stderr, "usage: fsck_muxfs [-a] directory ...\n");
 }

@@ -34,8 +34,7 @@
 #define MUXFS_DECIMAL_UINT64_LENGTH_MAX 20
 
 struct muxfs_dev_conf_checklist {
-	int has_version, has_alg, has_sign, has_uuid, has_array,
-	    has_seq_zero_time;
+	int has_version, has_alg, has_uuid, has_array, has_seq_zero_time;
 };
 
 static int
@@ -183,14 +182,6 @@ muxfs_conf_line_parse(struct muxfs_dev_conf *conf, const char *line,
 		if (muxfs_chk_str_to_type(&conf->chk_alg_type, val, val_len))
 			return 1;
 		cl->has_alg = 1;
-	} else if (strncmp(key, "sign", key_len) == 0) {
-		if (strncmp(val, "y", val_len) == 0)
-			conf->sign = 1;
-		else if (strncmp(val, "n", val_len) == 0)
-			conf->sign = 0;
-		else
-			return 1;
-		cl->has_sign = 1;
 	} else if (strncmp(key, "uuid", key_len) == 0) {
 		if (muxfs_uuid_read(conf->uuid, val, val_len))
 			return 1;
@@ -224,7 +215,7 @@ muxfs_conf_check(struct muxfs_dev_conf *conf,
 	uint32_t found;
 	const uint8_t *uuid;
 
-	if (!(cl.has_alg && cl.has_sign && cl.has_uuid && cl.has_array &&
+	if (!(cl.has_alg && cl.has_uuid && cl.has_array &&
 	    cl.has_version && cl.has_seq_zero_time))
 		return 1;
 
@@ -312,7 +303,6 @@ muxfs_conf_write(struct muxfs_dev_conf *conf, int fd)
 	    muxfs_version_flavor_str(conf->version.flavor));
 	dprintf(fd, "chk_alg=%s\n",
 	    muxfs_chk_type_to_str(conf->chk_alg_type));
-	dprintf(fd, "sign=%s\n", conf->sign ? "y" : "n");
 
 	uuid_dec_le(conf->uuid, &uuid);
 	uuid_to_string(&uuid, &uuid_str, &uuid_status);

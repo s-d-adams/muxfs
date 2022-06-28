@@ -25,14 +25,14 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "debug.h"
 #include "muxfs.h"
 
 #define MUXFS_PATH_DIR ".muxfs"
-#define MUXFS_PATH_CONF     MUXFS_PATH_DIR"/muxfs.conf"
-#define MUXFS_PATH_STATE_DB MUXFS_PATH_DIR"/state.db"
-#define MUXFS_PATH_META_DB  MUXFS_PATH_DIR"/meta.db"
-#define MUXFS_PATH_ASSIGN_DB  MUXFS_PATH_DIR"/assign.db"
+#define MUXFS_PATH_CONF		MUXFS_PATH_DIR"/muxfs.conf"
+#define MUXFS_PATH_STATE_DB	MUXFS_PATH_DIR"/state.db"
+#define MUXFS_PATH_META_DB	MUXFS_PATH_DIR"/meta.db"
+#define MUXFS_PATH_ASSIGN_DB	MUXFS_PATH_DIR"/assign.db"
+#define MUXFS_PATH_LFILE	MUXFS_PATH_DIR"/lfile"
 
 /*
  * We store the roots here instead of struct muxfs_dev so files that include
@@ -145,7 +145,8 @@ muxfs_dev_init(dind dev_index)
 	dev->  root_fd =
 	dev-> state_fd =
 	dev->  meta_fd =
-	dev->assign_fd = -1;
+	dev->assign_fd =
+	dev-> lfile_fd = -1;
 }
 
 MUXFS void
@@ -194,7 +195,7 @@ muxfs_dev_append(dind *dev_index_out, const char *path)
 MUXFS int
 muxfs_dev_mount(dind dev_index)
 {
-	int rc, root_fd, conf_fd, state_fd, meta_fd, assign_fd;
+	int rc, root_fd, conf_fd, state_fd, meta_fd, assign_fd, lfile_fd;
 	uint32_t eq;
 	uint8_t *uuid;
 	struct muxfs_dev *dev;
@@ -203,7 +204,8 @@ muxfs_dev_mount(dind dev_index)
 	  conf_fd =
 	 state_fd =
 	  meta_fd =
-	assign_fd = -1;
+	assign_fd =
+	 lfile_fd = -1;
 
 	dev = &muxfs_dev_array[dev_index];
 	if (!dev->attached_now)
@@ -250,14 +252,21 @@ muxfs_dev_mount(dind dev_index)
 	if (muxfs_dev_state_mount(&dev->state, state_fd))
 		goto fail;
 
+	if ((lfile_fd = openat(root_fd, MUXFS_PATH_LFILE, O_RDONLY|O_DIRECTORY))
+	    == -1)
+		goto fail;
+
 	dev->  root_fd =   root_fd;
 	dev-> state_fd =  state_fd;
 	dev->  meta_fd =   meta_fd;
 	dev->assign_fd = assign_fd;
+	dev-> lfile_fd =  lfile_fd;
 	dev->mounted_now = 1;
 
 	return 0;
 fail:
+	if (lfile_fd != -1)
+		close(lfile_fd);
 	if (assign_fd != -1)
 		close(assign_fd);
 	if (meta_fd != -1)

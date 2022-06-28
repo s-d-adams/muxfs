@@ -29,44 +29,72 @@
 #include "gen.h"
 
 MUXFS int
-muxfs_desc_chk_file_content(struct muxfs_desc *desc, dind dev_index, int fd)
+muxfs_desc_chk_reg_content(struct muxfs_desc *desc, dind dev_index,
+    const char *path)
 {
+	int rc;
 	struct muxfs_dev *dev;
+	struct stat st;
+	size_t fsz;
+	int fd;
 	struct muxfs_chk chk;
 	uint8_t readbuf[MUXFS_BLOCK_SIZE];
-	ssize_t readsz;
 	enum muxfs_chk_alg_type alg;
+
+	rc = 1;
+
+	if (muxfs_dev_get(&dev, dev_index))
+		return 1;
+	alg = dev->conf.chk_alg_type;
+
+	if (fstatat(dev->root_fd, path, &st, AT_SYMLINK_NOFOLLOW))
+		return 1;
+	fsz = st.st_size;
+
+	if (fsz <= MUXFS_BLOCK_SIZE) {
+		if ((fd = openat(dev->root_fd, path, O_RDONLY|O_NOFOLLOW))
+		    == -1)
+			goto out;
+		muxfs_chk_init(&chk, alg);
+		if (lseek(fd, 0, SEEK_SET) != 0)
+			goto out2;
+		if (read(fd, readbuf, fsz) != fsz)
+			goto out2;
+		muxfs_chk_update(&chk, readbuf, fsz);
+		muxfs_chk_final(desc->content_checksum, &chk);
+
+		rc = 0;
+out2:
+		if (close(fd))
+			exit(-1);
+out:
+		return rc;
+	}
+
+	return muxfs_lfile_readback(desc->content_checksum, dev_index, path, 0,
+	    st.st_size, NULL);
+}
+
+MUXFS int
+muxfs_desc_chk_dir_content(struct muxfs_desc *desc, dind dev_index,
+    const char *path)
+{
+	int rc, fd;
+	struct muxfs_dev *dev;
+	struct muxfs_dir dir;
 
 	if (muxfs_dev_get(&dev, dev_index))
 		return 1;
 
-	alg = dev->conf.chk_alg_type;
-	
-	muxfs_chk_init(&chk, alg);
-
-	if (lseek(fd, 0, SEEK_SET) != 0)
+	if ((fd = openat(dev->root_fd, path, O_RDONLY|O_NOFOLLOW))
+	    == -1)
 		return 1;
-	while ((readsz = read(fd, readbuf, MUXFS_BLOCK_SIZE)) > 0) {
-		if (readsz == -1)
-			return 1;
-		muxfs_chk_update(&chk, readbuf, readsz);
-	}
-
-	muxfs_chk_final(desc->content_checksum, &chk);
-
-	return 0;
-}
-
-MUXFS int
-muxfs_desc_chk_dir_content(struct muxfs_desc *desc, dind dev_index, int fd)
-{
-	int rc;
-	struct muxfs_dir dir;
-
 	if (muxfs_pushdir(&dir, fd, "."))
 		exit(-1);
 	rc = muxfs_dir_content_chk(desc->content_checksum, dev_index, &dir);
 	if (muxfs_popdir(&dir))
+		exit(-1);
+	if (close(fd))
 		exit(-1);
 	return rc;
 }
@@ -113,35 +141,18 @@ MUXFS int
 muxfs_desc_chk_node_content(struct muxfs_desc *desc, dind dev_index,
     const char *path)
 {
-	struct muxfs_dev *dev;
-	int fd, rc;
-
-	if (muxfs_dev_get(&dev, dev_index))
-		return 1;
-
 	switch (desc->type) {
 	case MUXFS_DT_REG:
-		if ((fd = openat(dev->root_fd, path, O_RDONLY|O_NOFOLLOW))
-		    == -1)
-			return 1;
-		rc = muxfs_desc_chk_file_content(desc, dev_index, fd);
-		close(fd);
-		break;
+		return muxfs_desc_chk_reg_content(desc, dev_index, path);
 	case MUXFS_DT_DIR:
-		if ((fd = openat(dev->root_fd, path, O_RDONLY|O_NOFOLLOW))
-		    == -1)
-			return 1;
-		rc = muxfs_desc_chk_dir_content(desc, dev_index, fd);
-		close(fd);
-		break;
+		return muxfs_desc_chk_dir_content(desc, dev_index, path);
 	case MUXFS_DT_LNK:
-		rc = muxfs_desc_chk_symlink_content(desc, dev_index, path);
-		break;
+		return muxfs_desc_chk_symlink_content(desc, dev_index, path);
 	default:
 		return 1;
 	}
 	
-	return rc;
+	exit(-1); /* Unreachable. */
 }
 
 MUXFS void
@@ -159,18 +170,20 @@ muxfs_desc_chk_meta(uint8_t *sum_out, const struct muxfs_desc *desc,
 	u64h = desc->eno;
 	u64le = htole64(u64h);
 	muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
-	u64h = desc->type;
-	u64le = htole64(u64h);
-	muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
 	u64h = desc->owner;
 	u64le = htole64(u64h);
 	muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
 	u64h = desc->group;
 	u64le = htole64(u64h);
 	muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
-	u64h = desc->perms;
+	u64h = desc->mode;
 	u64le = htole64(u64h);
 	muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
+	if (desc->type == MUXFS_DT_REG) {
+		u64h = desc->size;
+		u64le = htole64(u64h);
+		muxfs_chk_update(&chk, (uint8_t *)&u64le, sizeof(uint64_t));
+	}
 
 	muxfs_chk_update(&chk, desc->content_checksum, chksz);
 	muxfs_chk_final(sum_out, &chk);
@@ -190,7 +203,8 @@ muxfs_desc_init_from_stat(struct muxfs_desc *desc_out, struct stat *st,
 		.type = desc_type,
 		.owner = st->st_uid,
 		.group = st->st_gid,
-		.perms = st->st_mode
+		.mode = st->st_mode,
+		.size = st->st_size,
 	};
 	return 0;
 }

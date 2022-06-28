@@ -1,4 +1,4 @@
-/* version.c */
+/* fsck_muxfs_unity.c */
 /*
  * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
  *
@@ -15,11 +15,17 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#include "muxfs.h"
-
-struct muxfs_version
-muxfs_program_version = {
-	.number   = 0,
-	.revision = 2,
-	.flavor   = VF_CURRENT
-};
+#include "chk.c"
+#include "conf.c"
+#include "desc.c"
+#include "dev.c"
+#if MUXFS_DS_MALLOC == 1
+#include "ds_malloc.c"
+#else
+#include "ds.c"
+#endif
+#include "lfile.c"
+#include "state.c"
+#include "util.c"
+#include "version.c"
+#include "fsck_muxfs.c"
