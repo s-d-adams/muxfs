@@ -1,6 +1,6 @@
-/* debug.h */
+/* mount.h */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,14 +15,19 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _DEBUG_H_
-#define _DEBUG_H_
+#ifndef _MOUNT_H_
+#define _MOUNT_H_
 
-#if 0
-#include <stdio.h>
-#define debug printf
-#else
-#define debug(...) do{}while(0)
-#endif
+#include <sys/syslimits.h>
 
-#endif /* _DEBUG_H_ */
+#include "muxfs.h"
+
+struct muxfs_args {
+	char	mp_path[PATH_MAX];
+	char	dev_paths[MUXFS_DEV_COUNT_MAX][PATH_MAX];
+	size_t	dev_count;
+};
+
+extern struct muxfs_args muxfs_cmdline;
+
+#endif /* _MOUNT_H_ */

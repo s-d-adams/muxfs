@@ -1,6 +1,6 @@
-/* fsck_muxfs.c */
+/* scan.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -26,18 +26,13 @@
 #include "ds.h"
 #include "muxfs.h"
 
-enum muxfs_fsck_mode {
-	MUXFS_FSCK_AUDIT,
-	MUXFS_FSCK_RESTORE,
-};
-
 /*
  * 'path' is required to be null-terminated and pointing to a buffer of
  * capacity PATH_MAX, 'len' is provided so that 'path' may be mutated, then
  * returned to its original state.
  */
 static int
-muxfs_fsck_impl(enum muxfs_fsck_mode mode, dind dev_index, char *path,
+muxfs_scan_impl(enum muxfs_scan_mode mode, dind dev_index, char *path,
     size_t len)
 {
 	int			 rc;
@@ -51,7 +46,7 @@ muxfs_fsck_impl(enum muxfs_fsck_mode mode, dind dev_index, char *path,
 
 	epath = (len > 0) ? path : ".";
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		return 1;
 
 	if (fstatat(dev->root_fd, epath, &st, AT_SYMLINK_NOFOLLOW))
@@ -79,13 +74,13 @@ muxfs_fsck_impl(enum muxfs_fsck_mode mode, dind dev_index, char *path,
 			if (len > 0)
 				strcat(path, "/");
 			strcat(path, dname);
-			if (muxfs_fsck_impl(mode, dev_index, path, sublen))
+			if (muxfs_scan_impl(mode, dev_index, path, sublen))
 				goto dirout2;
 			path[len] = '\0';
 		}
 		if (muxfs_readback(dev_index, epath, 0, NULL)) {
 			printf("%s/%s\n", dev->root_path, epath);
-			if ((mode == MUXFS_FSCK_RESTORE) &&
+			if ((mode == MUXFS_SCAN_HEAL) &&
 			    muxfs_state_restore_push_back(dev_index, epath))
 				exit(-1);
 		}
@@ -100,7 +95,7 @@ dirout:
 		return 1;
 	if (muxfs_readback(dev_index, epath, 0, NULL)) {
 		printf("%s/%s\n", dev->root_path, epath);
-		if ((mode == MUXFS_FSCK_RESTORE) &&
+		if ((mode == MUXFS_SCAN_HEAL) &&
 		    muxfs_state_restore_push_back(dev_index, epath))
 			exit(-1);
 	}
@@ -108,81 +103,73 @@ dirout:
 }
 
 static int
-muxfs_fsck(enum muxfs_fsck_mode mode, dind dev_index)
+muxfs_scan(enum muxfs_scan_mode mode, dind dev_index)
 {
 	char path[PATH_MAX];
 
 	memset(path, 0, PATH_MAX);
-	if (muxfs_fsck_impl(mode, dev_index, path, 0))
+	if (muxfs_scan_impl(mode, dev_index, path, 0))
 		return 1;
-	if (mode == MUXFS_FSCK_RESTORE)
+	if (mode == MUXFS_SCAN_HEAL)
 		muxfs_restore_now();
 	return 0;
 }
 
-int
-main(int argc, char *argv[])
+static void
+muxfs_audit_usage(void)
 {
-	uint64_t next_eno, max_next_eno;
-	dind i, j, mnts;
-	struct muxfs_args *args;
-	dind dev_index, dev_count;
-	enum muxfs_fsck_mode fsck_mode;
+	fprintf(stderr, "usage: muxfs audit directory ...\n");
+}
+
+static void
+muxfs_heal_usage(void)
+{
+	fprintf(stderr, "usage: muxfs heal directory ...\n");
+}
+
+MUXFS int
+muxfs_scan_main(enum muxfs_scan_mode scan_mode, int argc, char *argv[])
+{
+	dind i, dev_count;
 
 	if (muxfs_state_syslog_init())
-		return -1;
+		exit(-1);
 	if (muxfs_dsinit())
-		return -1;
+		exit(-1);
 
-	args = &muxfs_cmdline;
 	if (muxfs_parse_args(argc, argv, 1)) {
-		muxfs_fsck_usage();
-		return -1;
+		if (scan_mode == MUXFS_SCAN_AUDIT)
+			muxfs_audit_usage();
+		else
+			muxfs_heal_usage();
+		exit(1);
 	}
-	fsck_mode = args->a ? MUXFS_FSCK_AUDIT : MUXFS_FSCK_RESTORE;
 
-	muxfs_dev_module_init();
-	if (muxfs_state_restore_queue_init())
+	if (muxfs_init(0))
 		exit(-1);
 
-	mnts = 0;
-	max_next_eno = 0;
-	for (i = 0; i < args->dev_count; ++i) {
-		if (muxfs_dev_append(&j, args->dev_paths[i]))
-			exit(-1);
-		if (muxfs_dev_mount(j))
-			continue;
-		if (muxfs_assign_peek_next_eno(&next_eno, mnts))
-			exit(-1);
-		++mnts;
-		if (next_eno > max_next_eno)
-			max_next_eno = next_eno;
+	if ((dev_count = muxfs_dev_count()) == 0) {
+		dprintf(2, "Error: The directory array is empty.\n");
+		exit(1);
 	}
-	if (mnts == 0)
-		exit(-1);
 
-	if (muxfs_state_eno_next_init(max_next_eno))
-		exit(-1);
+	switch (muxfs_dev_seq_check()) {
+	case 0:
+		break; /* Match. */
+	case 1:
+		exit(-1); /* Error. */
+	case 2:
+		exit(1); /* Mismatch. */
+	default:
+		exit(-1); /* Programming error. */
+	}
 
-	if ((dev_count = muxfs_dev_count()) == 0)
-		exit(-1);
-	for (dev_index = 0; dev_index < dev_count; ++dev_index) {
-		if (muxfs_fsck(fsck_mode, dev_index))
+	for (i = 0; i < dev_count; ++i) {
+		if (muxfs_scan(scan_mode, i))
 			exit(-1);
 	}
 
-	dev_count = muxfs_dev_count();
-	for (i = dev_count; i > 0; --i) {
-		j = i - 1;
-		if (muxfs_dev_is_mounted(j)) {
-			if (muxfs_dev_unmount(j))
-				exit(-1);
-		}
-	}
-	muxfs_state_restore_queue_final();
-	if (muxfs_state_syslog_final())
-		exit(-1);
-	if (muxfs_dsfinal())
+	if (muxfs_final())
 		exit(-1);
 
 	return 0;

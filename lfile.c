@@ -1,6 +1,6 @@
 /* lfile.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -441,7 +441,7 @@ muxfs_lfile_readback(uint8_t *root_sum, dind dev_index, const char *path,
 	lfile = MAP_FAILED;
 	lfilesz = 0;
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		goto out;
 	alg = dev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);

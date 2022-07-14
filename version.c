@@ -1,6 +1,6 @@
 /* version.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -15,11 +15,26 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <stdio.h>
+
 #include "muxfs.h"
 
 struct muxfs_version
 muxfs_program_version = {
 	.number   = 0,
-	.revision = 2,
+	.revision = 3,
 	.flavor   = VF_CURRENT
 };
+
+MUXFS void
+muxfs_version_print(void)
+{
+	static const char *flavors[] = {
+		"current",
+		"release",
+		"stable"
+	};
+	printf("muxfs %u.%u-%s\n", muxfs_program_version.number,
+	    muxfs_program_version.revision,
+	    flavors[muxfs_program_version.flavor]);
+}

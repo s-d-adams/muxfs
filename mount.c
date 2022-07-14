@@ -1,6 +1,6 @@
-/* mount_muxfs.c */
+/* mount.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,26 +17,42 @@
 
 #include <fuse.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ds.h"
 #include "muxfs.h"
 #include "ops.h"
 
-int
-main(int argc, char *argv[])
+static void
+muxfs_mount_usage(void)
+{
+	fprintf(stderr, "usage: muxfs mount [-f] mount_point directory ...\n");
+}
+
+MUXFS int
+muxfs_mount_main(int argc, char *argv[])
 {
 	int n;
 	char *fuse_argv[8];
 
-	if (muxfs_state_syslog_init())
-		return -1;
-	if (muxfs_dsinit())
-		return -1;
-
 	if (muxfs_parse_args(argc, argv, 0)) {
 		muxfs_mount_usage();
-		return -1;
+		exit(1);
+	}
+
+	if (muxfs_init(0))
+		exit(-1);
+
+	switch (muxfs_dev_seq_check()) {
+	case 0:
+		break; /* Match. */
+	case 1:
+		exit(-1); /* Error. */
+	case 2:
+		exit(1); /* Mismatch. */
+	default:
+		exit(-1); /* Programming error. */
 	}
 
 	n = 0;

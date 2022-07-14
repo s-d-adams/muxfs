@@ -1,6 +1,6 @@
 /* ops.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -59,23 +59,27 @@ muxfs_statfs(const char *path, struct statvfs *stvfs)
 	dind dev_count, i;
 	struct muxfs_dev *dev;
 	int fd, err, subrc;
+	struct statvfs st, st_agg;
+	int has_st;
+	size_t sz;
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
+	has_st = 0;
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_eids_set();
 		fd = openat(dev->root_fd, path, O_RDONLY);
 		err = errno;
 		muxfs_eids_reset();
 		if (fd == -1)
-			continue;
+			return -err;
 		muxfs_eids_set();
-		subrc = fstatvfs(fd, stvfs);
+		subrc = fstatvfs(fd, &st);
 		err = errno;
 		muxfs_eids_reset();
 		if (subrc) {
@@ -85,63 +89,58 @@ muxfs_statfs(const char *path, struct statvfs *stvfs)
 		}
 		if (close(fd))
 			exit(-1);
+		if (has_st) {
+			sz = (st.f_frsize * st.f_blocks) / MUXFS_BLOCK_SIZE;
+			if (st_agg.f_blocks > sz)
+				st_agg.f_blocks = sz;
+			sz = (st.f_frsize * st.f_bfree) / MUXFS_BLOCK_SIZE;
+			if (st_agg.f_bfree > sz)
+				st_agg.f_bfree = sz;
+			sz = (st.f_frsize * st.f_bavail) / MUXFS_BLOCK_SIZE;
+			if (st_agg.f_bavail > sz)
+				st_agg.f_bavail = sz;
+			if (st_agg.f_files < st.f_files)
+				st_agg.f_files = st.f_files;
+			if (st_agg.f_ffree > st.f_ffree)
+				st_agg.f_ffree = st.f_ffree;
+			if (st_agg.f_favail > st.f_favail)
+				st_agg.f_favail = st.f_favail;
+			if (st_agg.f_namemax > st.f_namemax)
+				st_agg.f_namemax = st.f_namemax;
+		} else {
+			st_agg = st;
+			st_agg.f_bsize = MUXFS_BLOCK_SIZE;
+			st_agg.f_frsize = MUXFS_BLOCK_SIZE;
+			sz = (st.f_frsize * st.f_blocks) / MUXFS_BLOCK_SIZE;
+			st_agg.f_blocks = sz;
+			sz = (st.f_frsize * st.f_bfree) / MUXFS_BLOCK_SIZE;
+			st_agg.f_bfree = sz;
+			sz = (st.f_frsize * st.f_bavail) / MUXFS_BLOCK_SIZE;
+			st_agg.f_bavail = sz;
+			st_agg.f_fsid = 0;
+			st_agg.f_flag = 0;
+			has_st = 1;
+		}
+	}
+	if (has_st) {
+		*stvfs = st_agg;
 		return 0;
 	}
 	return -EIO;
 }
 
 static void *
-muxfs_init(struct fuse_conn_info *fci)
+muxfs_fuse_init(struct fuse_conn_info *fci)
 {
-	uint64_t next_eno, max_next_eno;
-	dind i, j, mnts;
-	struct muxfs_args *args;
-
-	args = &muxfs_cmdline;
-
-	muxfs_dev_module_init();
-	if (muxfs_state_restore_queue_init())
-		exit(-1);
-
-	mnts = 0;
-	max_next_eno = 0;
-	for (i = 0; i < args->dev_count; ++i) {
-		if (muxfs_dev_append(&j, args->dev_paths[i]))
-			exit(-1);
-		if (muxfs_dev_mount(j))
-			continue;
-		if (muxfs_assign_peek_next_eno(&next_eno, mnts))
-			exit(-1);
-		++mnts;
-		if (next_eno > max_next_eno)
-			max_next_eno = next_eno;
-	}
-	if (mnts == 0)
-		exit(-1);
-
-	if (muxfs_state_eno_next_init(max_next_eno))
-		exit(-1);
-
+	muxfs_info("Mounted");
 	return NULL;
 }
 
 static void
-muxfs_destroy(void *data)
+muxfs_fuse_destroy(void *data)
 {
-	dind i, j, dev_count;
-
-	dev_count = muxfs_dev_count();
-	for (i = dev_count; i > 0; --i) {
-		j = i - 1;
-		if (muxfs_dev_is_mounted(j)) {
-			if (muxfs_dev_unmount(j))
-				exit(-1);
-		}
-	}
-	muxfs_state_restore_queue_final();
-	if (muxfs_state_syslog_final())
-		exit(-1);
-	if (muxfs_dsfinal())
+	muxfs_info("Unmounting");
+	if (muxfs_final())
 		exit(-1);
 }
 
@@ -168,7 +167,7 @@ muxfs_open(const char *path, struct fuse_file_info *ffi)
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_eids_set();
 		fd = openat(dev->root_fd, path, ffi->flags);
@@ -196,7 +195,7 @@ muxfs_opendir(const char *path, struct fuse_file_info *ffi)
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_eids_set();
 		fd = openat(dev->root_fd, path, ffi->flags|O_DIRECTORY);
@@ -274,6 +273,10 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 
 	struct muxfs_cud	 cud;
 
+	time_t			 now;
+
+	mode_t			 old_umask;
+
 	fuse_ctx = fuse_get_context();
 
 	if ((dev_count = muxfs_dev_count()) == 0)
@@ -286,8 +289,10 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 	if (muxfs_parent_gid(&parent_gid, args->path))
 		return -EIO;
 
+	now = time(NULL);
+
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_working_push(i);
 
@@ -299,7 +304,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			.eno = eno,
 			.owner = fuse_ctx->uid,
 			.group = parent_gid,
-			.mode = args->mode,
+			.mode = args->mode & ~(fuse_ctx->umask),
 			.size = 0,
 		};
 		if (muxfs_desc_type_from_mode(&desc.type, args->mode)) {
@@ -323,9 +328,11 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 		case MUXFS_CT_MKNOD:
 			if (S_ISREG(args->mode)) {
 				muxfs_eids_set();
+				old_umask = umask(fuse_ctx->umask);
 				subfd = openat(fd, args->path,
 				    O_RDWR|O_CREAT|O_EXCL, args->mode);
 				err = errno;
+				umask(old_umask);
 				muxfs_eids_reset();
 				if (subfd != -1) {
 					if (close(subfd))
@@ -340,14 +347,18 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			break;
 		case MUXFS_CT_MKDIR:
 			muxfs_eids_set();
+			old_umask = umask(fuse_ctx->umask);
 			subrc = mkdirat(fd, args->path, args->mode);
 			err = errno;
+			umask(old_umask);
 			muxfs_eids_reset();
 			break;
 		case MUXFS_CT_SYMLINK:
 			muxfs_eids_set();
+			old_umask = umask(fuse_ctx->umask);
 			subrc = symlinkat(args->link_content, fd, args->path);
 			err = errno;
+			umask(old_umask);
 			muxfs_eids_reset();
 			break;
 		default:
@@ -398,14 +409,14 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			goto fail;
 	
 		has_write = 1;
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 fail:
 		muxfs_degraded_set(i);
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 early:
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		return rc;
 	}
 	return has_write ? 0 : -EIO;
@@ -453,7 +464,7 @@ muxfs_symlink(const char *link_content, const char *path)
 	args.type = MUXFS_CT_SYMLINK;
 	args.path = path;
 	args.link_content = link_content;
-	args.mode = S_IFLNK | 0755;
+	args.mode = S_IFLNK|0777;
 
 	return muxfs_op_create(&args);
 }
@@ -488,6 +499,9 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 	char			 postwr_ppath[PATH_MAX];
 	int			 postwr_pfd;
 	struct stat		 postwr_st;
+	struct muxfs_cud	 cud;
+
+	time_t			 now;
 
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
@@ -495,8 +509,10 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 	has_write = 0;
 	return_eno = UINT64_MAX;
 
+	now = time(NULL);
+
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_working_push(i);
 
@@ -576,10 +592,16 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 			goto fail;
 
 		memset(&wr_meta, 0, sizeof(wr_meta));
-		memset(&wr_assign  , 0, sizeof(wr_assign  ));
+		memset(&wr_assign  , 0, sizeof(wr_assign));
 		if (muxfs_meta_write(&wr_meta, i, prewr_ino))
 			goto fail;
 		if (muxfs_assign_write(&wr_assign, i, prewr_eno))
+			goto fail;
+
+		cud.type = MUXFS_CUD_DELETE;
+		cud.path = path;
+		cud.pre_meta = prewr_meta;
+		if (muxfs_ancestors_meta_recompute(i, &cud))
 			goto fail;
 
 		if (!has_write) {
@@ -587,14 +609,14 @@ muxfs_op_delete(const char *path, enum muxfs_op_delete_type type)
 			return_eno = prewr_eno;
 		}
 
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 fail:
 		muxfs_degraded_set(i);
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 early:
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		return rc;
 	}
 
@@ -888,7 +910,7 @@ muxfs_op_read(struct muxfs_op_read_args *args)
 		return -EIO;
 
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		fd = dev->root_fd;
 		alg = dev->conf.chk_alg_type;
@@ -1605,13 +1627,17 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 
 	struct muxfs_cud	 cud;
 
+	time_t			 now;
+
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 
 	has_write = 0;
 
+	now = time(NULL);
+
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_working_push(i);
 
@@ -1670,6 +1696,8 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 				wr_desc.owner = args->uid;
 			if (args->gid != -1)
 				wr_desc.group = args->gid;
+			/* Possibly not POSIX compliant. */
+			wr_desc.mode &= (~(S_ISUID|S_ISGID));
 			break;
 		case MUXFS_UT_UTIMENS:
 			muxfs_eids_set();
@@ -1712,12 +1740,15 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 		if (muxfs_meta_write(&wr_meta, i, prewr_ino))
 			goto fail;
 
-		if ((subfd = openat(fd, args->path, O_RDONLY|O_NOFOLLOW)) == -1)
-			goto fail;
-		if (fsync(subfd))
-			exit(-1);
-		if (close(subfd))
-			exit(-1);
+		if (prewr_desc.type != MUXFS_DT_LNK) {
+			if ((subfd = openat(fd, args->path,
+			    O_RDONLY|O_NOFOLLOW)) == -1)
+				goto fail;
+			if (fsync(subfd))
+				exit(-1);
+			if (close(subfd))
+				exit(-1);
+		}
 		if (fsync(dev->meta_fd))
 			exit(-1);
 
@@ -1775,14 +1806,14 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 			goto fail;
 
 		has_write = 1;
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 fail:
 		muxfs_degraded_set(i);
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 early:
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		return rc;
 	}
 	if (has_write) {
@@ -1815,6 +1846,8 @@ muxfs_rename(const char *from, const char *to)
 
 	struct muxfs_cud	 cud;
 
+	time_t			 now;
+
 	if (muxfs_path_sanitize(&from))
 		return -EIO;
 	if (muxfs_path_sanitize(&to))
@@ -1825,8 +1858,10 @@ muxfs_rename(const char *from, const char *to)
 
 	has_write = 0;
 
+	now = time(NULL);
+
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		muxfs_working_push(i);
 
@@ -1909,14 +1944,14 @@ muxfs_rename(const char *from, const char *to)
 			goto fail;
 
 		has_write = 1;
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 fail:
 		muxfs_degraded_set(i);
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		continue;
 early:
-		muxfs_working_pop(i);
+		muxfs_working_pop(i, now);
 		return rc;
 	}
 	return has_write ? 0 : -EIO;
@@ -2011,58 +2046,58 @@ muxfs_write(const char *path, const char *buf, size_t bufsz, off_t offset,
 const struct fuse_operations
 muxfs_fuse_ops = {
 	/* Pass-through */
-	.statfs      = muxfs_statfs     ,
+	.statfs      = muxfs_statfs      ,
 	/* Stateful */
-	.init        = muxfs_init       ,
-	.destroy     = muxfs_destroy    ,
+	.init        = muxfs_fuse_init   ,
+	.destroy     = muxfs_fuse_destroy,
 	/* No-ops */
-	.fsync       = muxfs_fsync      ,
-	.flush       = muxfs_flush      ,
-	.release     = muxfs_release    ,
-	.releasedir  = muxfs_releasedir ,
+	.fsync       = muxfs_fsync       ,
+	.flush       = muxfs_flush       ,
+	.release     = muxfs_release     ,
+	.releasedir  = muxfs_releasedir  ,
 	/* Create */
-	.mknod       = muxfs_mknod      ,
-	.mkdir       = muxfs_mkdir      ,
-	.symlink     = muxfs_symlink    ,
+	.mknod       = muxfs_mknod       ,
+	.mkdir       = muxfs_mkdir       ,
+	.symlink     = muxfs_symlink     ,
 	/* Read */
-	.open        = muxfs_open       ,
-	.opendir     = muxfs_opendir    ,
-	.getattr     = muxfs_getattr    ,
-	.read        = muxfs_read       ,
-	.readlink    = muxfs_readlink   ,
-	.readdir     = muxfs_readdir    ,
+	.open        = muxfs_open        ,
+	.opendir     = muxfs_opendir     ,
+	.getattr     = muxfs_getattr     ,
+	.read        = muxfs_read        ,
+	.readlink    = muxfs_readlink    ,
+	.readdir     = muxfs_readdir     ,
 	/* Update */
-	.rename      = muxfs_rename     ,
-	.chmod       = muxfs_chmod      ,
-	.chown       = muxfs_chown      ,
-	.utimens     = muxfs_utimens    ,
-	.truncate    = muxfs_truncate   ,
-	.write       = muxfs_write      ,
+	.rename      = muxfs_rename      ,
+	.chmod       = muxfs_chmod       ,
+	.chown       = muxfs_chown       ,
+	.utimens     = muxfs_utimens     ,
+	.truncate    = muxfs_truncate    ,
+	.write       = muxfs_write       ,
 	/* Delete */
-	.unlink      = muxfs_unlink     ,
-	.rmdir       = muxfs_rmdir      ,
+	.unlink      = muxfs_unlink      ,
+	.rmdir       = muxfs_rmdir       ,
 	/* Explicitly not supported */
-	.link        = muxfs_link       ,
-	.lock        = muxfs_lock       ,
+	.link        = muxfs_link        ,
+	.lock        = muxfs_lock        ,
 
 	/* Unsupported on OpenBSD: */
-	/*.getdir      = muxfs_getdir     ,*/
-	/*.setxattr    = muxfs_setxattr   ,*/
-	/*.getxattr    = muxfs_getxattr   ,*/
-	/*.listxattr   = muxfs_listxattr  ,*/
-	/*.removexattr = muxfs_removexattr,*/
-	/*.fsyncdir    = muxfs_fsyncdir   ,*/
-	/*.access      = muxfs_access     ,*/
-	/*.create      = muxfs_create     ,*/
+	/*.getdir      = muxfs_getdir      ,*/
+	/*.setxattr    = muxfs_setxattr    ,*/
+	/*.getxattr    = muxfs_getxattr    ,*/
+	/*.listxattr   = muxfs_listxattr   ,*/
+	/*.removexattr = muxfs_removexattr ,*/
+	/*.fsyncdir    = muxfs_fsyncdir    ,*/
+	/*.access      = muxfs_access      ,*/
+	/*.create      = muxfs_create      ,*/
 
 	/*
 	 * There do not appear to be implementations for these in libfuse on
 	 * OpenBSD:
 	 */
-	/*.fgetattr    = muxfs_fgetattr   ,*/
-	/*.ftruncate   = muxfs_ftruncate  ,*/
-	/*.bmap        = muxfs_bmap       ,*/ 
+	/*.fgetattr    = muxfs_fgetattr    ,*/
+	/*.ftruncate   = muxfs_ftruncate   ,*/
+	/*.bmap        = muxfs_bmap        ,*/ 
 
 	/* Unnecessary due to utimens: */
-	/*.utime       = muxfs_utime      ,*/
+	/*.utime       = muxfs_utime       ,*/
 };

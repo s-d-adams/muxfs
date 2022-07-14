@@ -1,11 +1,13 @@
+agg	Aggregate.
 alg	Algorithm; typically a checksum algorithm.
 blk	Block; a contiguous region of memory or data, typically of a standard
 	size.
 c	Child; as in an entry from a 'parent' directory.
 chk	Checksum.
-cud	Create, Update, Delete; a categorization of write operations.
+cmd	Command.
 comp	Component.
 conf	Configuration.
+cud	Create, Update, Delete; a categorization of write operations.
 d	Destination; typically the target 'dev' for a write operation.
 desc	Description; relating to file metadata.  More specifically a
 	description of an inode and its relevant metadata, including a checksum

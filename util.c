@@ -1,6 +1,6 @@
 /* util.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,7 +19,6 @@
 #include <sys/syslimits.h>
 #include <sys/types.h>
 
-#include <assert.h>
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -185,7 +184,7 @@ muxfs_dir_meta_recompute(struct muxfs_cud *pcud_out, dind dev_index,
 
 	rc = 1;
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		goto out;
 	root_fd = dev->root_fd;
 	alg = dev->conf.chk_alg_type;
@@ -305,7 +304,7 @@ muxfs_readback(dind i, const char *path, int shallow,
 	struct muxfs_desc	 desc;
 	uint8_t			 meta_chk_buf[MUXFS_CHKSZ_MAX];
 
-	if (muxfs_dev_get(&dev, i))
+	if (muxfs_dev_get(&dev, i, 0))
 		goto fail;
 	root_fd = dev->root_fd;
 	alg = dev->conf.chk_alg_type;
@@ -465,7 +464,8 @@ muxfs_ancestors_meta_recompute(dind dev_index, struct muxfs_cud *cud)
 
 	ccud = *cud;
 	
-	assert(strlen(cud->path) < PATH_MAX);
+	if (strlen(cud->path) >= PATH_MAX)
+		exit(-1);
 
 	path_len = strlen(cud->path);
 	memcpy(path, cud->path, path_len);
@@ -506,6 +506,38 @@ muxfs_existsat(int *exists_out, int fd, const char *path)
 	}
 
 	*exists_out = 1;
+	return 0;
+}
+
+MUXFS int
+muxfs_dir_is_empty(int *empty_out, char const *path)
+{
+	struct muxfs_dir dir;
+	size_t i, dnamelen;
+	const char *dname;
+	struct dirent *dirent;
+	int empty;
+
+	if (muxfs_pushdir(&dir, AT_FDCWD, path))
+		return 1;
+
+	empty = 1;
+	for (i = 0; i < dir.ent_count; ++i) {
+		dirent = dir.ent_array[i];
+		dname = dirent->d_name;
+		dnamelen = dirent->d_namlen;
+		if ((dnamelen == 1) && (strncmp(".", dname, 1) == 0))
+			continue;
+		if ((dnamelen == 2) && (strncmp("..", dname, 1) == 0))
+			continue;
+		empty = 0;
+		break;
+	}
+
+	if (muxfs_popdir(&dir))
+		exit(-1);
+
+	*empty_out = empty;
 	return 0;
 }
 
@@ -568,7 +600,7 @@ muxfs_pushdir(struct muxfs_dir *dir_out, int fd, const char *path)
 		exit(-1);
 
 	for (i = 0, j = 0; i < rdend; i += dirent->d_reclen, ++j)
-		ent_array[j] = (struct dirent *)&dirbuf[i];
+		dirent = ent_array[j] = (struct dirent *)&dirbuf[i];
 
 	qsort(ent_array, ent_count, sizeof(struct dirent *), muxfs_alphasort);
 
@@ -698,9 +730,9 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 
 	rc = 1;
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		goto out;
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		goto out;
 	alg = sdev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -925,9 +957,9 @@ muxfs_restore_reg(dind ddev_index, dind sdev_index, const char *path,
 	dlfd = -1;
 	slfd = -1;
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		goto out;
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		goto out;
 	alg = sdev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -1021,9 +1053,9 @@ muxfs_restore_symlink(dind ddev_index, dind sdev_index, const char *path,
 
 	rc = 1;
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		goto out;
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		goto out;
 	alg = sdev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -1258,9 +1290,9 @@ muxfs_restore_possible(int *is_delete_out, dind ddev_index, dind sdev_index,
 	memset(path, 0, PATH_MAX);
 	strcpy(path, _path);
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		return 1;
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		return 1;
 	alg = ddev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -1338,7 +1370,7 @@ muxfs_restore_delete(dind ddev_index, dind sdev_index, const char *path)
 	if (muxfs_path_is_root(path))
 		goto out;
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		goto out;
 	alg = ddev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -1353,7 +1385,7 @@ muxfs_restore_delete(dind ddev_index, dind sdev_index, const char *path)
 		strcpy(ppath, ".");
 	}
 
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		goto out;
 	if (fstatat(sdev->root_fd, ppath, &spst, AT_SYMLINK_NOFOLLOW))
 		goto out;
@@ -1404,9 +1436,9 @@ muxfs_dir_meta_restore(dind ddev_index, dind sdev_index, const char *path)
 	ino_t			 dino, sino;
 	struct muxfs_meta	 meta;
 
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		return 1;
-	if (muxfs_dev_get(&sdev, sdev_index))
+	if (muxfs_dev_get(&sdev, sdev_index, 0))
 		return 1;
 	if (fstatat(ddev->root_fd, path, &dst, AT_SYMLINK_NOFOLLOW))
 		return 1;
@@ -1437,7 +1469,8 @@ muxfs_ancestors_meta_restore(dind ddev_index, dind sdev_index,
 	if (muxfs_path_is_root(_path))
 		return 0;
 
-	assert(strlen(_path) < PATH_MAX);
+	if (strlen(_path) >= PATH_MAX)
+		exit(-1);
 
 	path_len = strlen(_path);
 	memcpy(path, _path, path_len);
@@ -1470,13 +1503,13 @@ muxfs_restore_impl(dind ddev_index, const char *path)
 
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return 1;
-	if (muxfs_dev_get(&ddev, ddev_index))
+	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		return 1;
 
 	for (si = 0; si < dev_count; ++si) {
 		if (si == ddev_index)
 			continue;
-		if (muxfs_dev_get(&sdev, si))
+		if (muxfs_dev_get(&sdev, si, 0))
 			continue;
 
 		switch (muxfs_restore_possible(&is_delete, ddev_index, si,
@@ -1558,7 +1591,8 @@ muxfs_restore_now(void)
 
 	memset(path, 0, PATH_MAX);
 	while (!muxfs_state_restore_pop_front(&ddev_index, path)) {
-		muxfs_working_push(ddev_index);
+		muxfs_info("Restoring: %lu:/%s\n", ddev_index, path);
+		muxfs_restoring_push(ddev_index);
 		switch (muxfs_restore_impl(ddev_index, path)) {
 		case 0:
 			muxfs_info("Restored: %lu:/%s\n",
@@ -1579,7 +1613,7 @@ muxfs_restore_now(void)
 fail:
 		muxfs_degraded_set(ddev_index);
 next:
-		muxfs_working_pop(ddev_index);
+		muxfs_restoring_pop(ddev_index);
 		memset(path, 0, PATH_MAX);
 	}
 }
@@ -1607,7 +1641,7 @@ muxfs_parent_gid(gid_t *parent_gid_out, const char *path)
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return 1;
 	for (i = 0; i < dev_count; ++i) {
-		if (muxfs_dev_get(&dev, i))
+		if (muxfs_dev_get(&dev, i, 0))
 			continue;
 		if (fstatat(dev->root_fd, ppath, &st, AT_SYMLINK_NOFOLLOW))
 			continue;
@@ -1634,7 +1668,7 @@ muxfs_dir_content_chk(uint8_t *sum_out, dind dev_index, struct muxfs_dir *dir)
 
 	rc = 1;
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		goto out;
 	alg = dev->conf.chk_alg_type;
 	chksz = muxfs_chk_size(alg);
@@ -1686,12 +1720,13 @@ muxfs_parse_args(int argc, char **argv, int no_mp)
 
 	memset(args, 0, sizeof(*args));
 
+	/* Shift one argument to account for the sub-command. */
+	++argv;
+	--argc;
+
 	c = 0;
-	while ((c = getopt(argc, argv, "af")) != -1) {
+	while ((c = getopt(argc, argv, "f")) != -1) {
 		switch (c) {
-		case 'a':
-			args->a = 1;
-			break;
 		case 'f':
 			args->f = 1;
 			break;
@@ -1707,21 +1742,9 @@ muxfs_parse_args(int argc, char **argv, int no_mp)
 		len = strlen(argv[i]);
 		if (len >= PATH_MAX)
 			return 1;
-		dest = (no_mp || (i < (argc - 1))) ?
+		dest = (no_mp || (i > 0)) ?
 		    args->dev_paths[args->dev_count++] : args->mp_path;
 		strcpy(dest, argv[i]);
 	} 
 	return 0;
-}
-
-MUXFS void
-muxfs_mount_usage(void)
-{
-	fprintf(stderr, "usage: mount_muxfs [-f] directory ... mount_point\n");
-}
-
-MUXFS void
-muxfs_fsck_usage(void)
-{
-	fprintf(stderr, "usage: fsck_muxfs [-a] directory ...\n");
 }

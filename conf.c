@@ -1,6 +1,6 @@
 /* conf.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -34,7 +34,7 @@
 #define MUXFS_DECIMAL_UINT64_LENGTH_MAX 20
 
 struct muxfs_dev_conf_checklist {
-	int has_version, has_alg, has_uuid, has_array, has_seq_zero_time;
+	int has_version, has_alg, has_array_uuid, has_dev_uuid, has_seq_zero_time;
 };
 
 static int
@@ -119,44 +119,6 @@ muxfs_uuid_read(uint8_t *dest, const char *src, size_t len)
 }
 
 static int
-muxfs_conf_array_parse(struct muxfs_dev_conf *conf, const char *array,
-                       size_t array_len)
-{
-	const char *b, *e;
-	size_t len, i;
-	uint8_t *uuid;
-
-	b = array;
-	while ((e = memchr(b, ',', array_len)) != NULL) {
-		len = e - b;
-		i = conf->expected_array_count++; 
-		uuid = conf->expected_array_uuids[i];
-		
-		if (muxfs_uuid_read(uuid, b, len))
-			return 1;
-		
-		array_len -= (len + 1);
-		b = e + 1;
-	}
-	/*
-	 * The UUIDs listed in the conf file are separated by commas and we do
-	 * not expect a final comma at the end so there is one more UUID to
-	 * process.
-	 */
-	if (array_len == 0)
-		return 1;
-
-	len = array_len;
-	i = conf->expected_array_count++; 
-	uuid = conf->expected_array_uuids[i];
-
-	if (muxfs_uuid_read(uuid, b, len))
-		return 1;
-
-	return 0;
-}
-
-static int
 muxfs_conf_line_parse(struct muxfs_dev_conf *conf, const char *line,
                       size_t len, struct muxfs_dev_conf_checklist *cl)
 {
@@ -182,14 +144,14 @@ muxfs_conf_line_parse(struct muxfs_dev_conf *conf, const char *line,
 		if (muxfs_chk_str_to_type(&conf->chk_alg_type, val, val_len))
 			return 1;
 		cl->has_alg = 1;
-	} else if (strncmp(key, "uuid", key_len) == 0) {
-		if (muxfs_uuid_read(conf->uuid, val, val_len))
+	} else if (strncmp(key, "array_uuid", key_len) == 0) {
+		if (muxfs_uuid_read(conf->array_uuid, val, val_len))
 			return 1;
-		cl->has_uuid = 1;
-	} else if (strncmp(key, "array", key_len) == 0) {
-		if (muxfs_conf_array_parse(conf, val, val_len))
+		cl->has_array_uuid = 1;
+	} else if (strncmp(key, "dev_uuid", key_len) == 0) {
+		if (muxfs_uuid_read(conf->dev_uuid, val, val_len))
 			return 1;
-		cl->has_array = 1;
+		cl->has_dev_uuid = 1;
 	} else if (strncmp(key, "seq_zero_time", key_len) == 0) {
 		if (val_len > MUXFS_DECIMAL_UINT64_LENGTH_MAX)
 			return 1;
@@ -211,26 +173,14 @@ static int
 muxfs_conf_check(struct muxfs_dev_conf *conf,
                  struct muxfs_dev_conf_checklist cl)
 {
-	size_t i;
-	uint32_t found;
-	const uint8_t *uuid;
-
-	if (!(cl.has_alg && cl.has_uuid && cl.has_array &&
+	if (!(cl.has_alg && cl.has_array_uuid && cl.has_dev_uuid &&
 	    cl.has_version && cl.has_seq_zero_time))
 		return 1;
 
 	if (conf->version.number != muxfs_program_version.number)
 		return 1;
 
-	if (conf->expected_array_count == 0)
-		return 1;
-	for (i = 0; i < conf->expected_array_count; ++i) {
-		uuid = conf->expected_array_uuids[i];
-		found = bcmp(conf->uuid, uuid, MUXFS_UUID_SIZE) == 0;
-		if (found)
-			break;
-	}
-	return found ? 0 : 1;
+	return 0;
 }
 
 MUXFS int
@@ -293,7 +243,6 @@ muxfs_conf_write(struct muxfs_dev_conf *conf, int fd)
 	uuid_t uuid;
 	char *uuid_str;
 	uint32_t uuid_status;
-	size_t i;
 
 	if (ftruncate(fd, 0))
 		return 1;
@@ -304,24 +253,19 @@ muxfs_conf_write(struct muxfs_dev_conf *conf, int fd)
 	dprintf(fd, "chk_alg=%s\n",
 	    muxfs_chk_type_to_str(conf->chk_alg_type));
 
-	uuid_dec_le(conf->uuid, &uuid);
+	uuid_dec_le(conf->array_uuid, &uuid);
 	uuid_to_string(&uuid, &uuid_str, &uuid_status);
 	if (uuid_status != uuid_s_ok)
 		return 1;
-	dprintf(fd, "uuid=%s\n", uuid_str);
+	dprintf(fd, "array_uuid=%s\n", uuid_str);
 	free(uuid_str);
-	dprintf(fd, "array=");
-	for (i = 0; i < conf->expected_array_count; ++i) {
-		uuid_dec_le(conf->expected_array_uuids[i], &uuid);
-		uuid_to_string(&uuid, &uuid_str, &uuid_status);
-		if (uuid_status != uuid_s_ok)
-			return 1;
-		dprintf(fd, "%s", uuid_str);
-		free(uuid_str);
-		if ((i + 1) < conf->expected_array_count)
-			dprintf(fd, ",");
-	}
-	dprintf(fd, "\n");
+
+	uuid_dec_le(conf->dev_uuid, &uuid);
+	uuid_to_string(&uuid, &uuid_str, &uuid_status);
+	if (uuid_status != uuid_s_ok)
+		return 1;
+	dprintf(fd, "dev_uuid=%s\n", uuid_str);
+	free(uuid_str);
 
 	dprintf(fd, "seq_zero_time=%llu\n", (uint64_t)conf->seq_zero_time);
 

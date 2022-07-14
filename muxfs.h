@@ -1,6 +1,6 @@
 /* muxfs.h */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -72,10 +72,8 @@ struct muxfs_dev_conf {
 	enum	muxfs_chk_alg_type chk_alg_type;
 
 	/* UUIDs are encoded as binary, little-endian. */
-	uint8_t	uuid[MUXFS_UUID_SIZE];
-
-	size_t	expected_array_count;
-	uint8_t	expected_array_uuids[MUXFS_DEV_COUNT_MAX][MUXFS_UUID_SIZE];
+	uint8_t	array_uuid[MUXFS_UUID_SIZE];
+	uint8_t	dev_uuid[MUXFS_UUID_SIZE];
 
 	/* The epoch time at which the sequence number was last at value 0. */
 	time_t  seq_zero_time;
@@ -94,6 +92,7 @@ struct muxfs_dev_state {
 	uint64_t	seq; /* Sequence number. */
 	uint64_t	mounted;
 	uint64_t	working;
+	uint64_t	restoring;
 	uint64_t	degraded;
 };
 MUXFS int muxfs_dev_state_write_fd(int, struct muxfs_dev_state *);
@@ -114,11 +113,12 @@ struct muxfs_dev {
 typedef size_t dind;
 MUXFS void muxfs_dev_module_init(void);
 MUXFS int  muxfs_dev_append(dind *dev_index_out, const char *);
-MUXFS int  muxfs_dev_mount(dind);
+MUXFS int  muxfs_dev_mount(dind, int);
 MUXFS int  muxfs_dev_unmount(dind);
 MUXFS int  muxfs_dev_is_mounted(dind);
 MUXFS dind muxfs_dev_count(void);
-MUXFS int  muxfs_dev_get(struct muxfs_dev **, dind);
+MUXFS int  muxfs_dev_get(struct muxfs_dev **, dind, int);
+MUXFS int  muxfs_dev_seq_check(void);
 
 enum muxfs_meta_flag {
 	MF_ASSIGNED = 0x1
@@ -160,12 +160,13 @@ MUXFS int muxfs_assign_write(const struct muxfs_assign *, dind, uint64_t);
 MUXFS int muxfs_assign_write_fd(int, const struct muxfs_assign *, uint64_t);
 
 MUXFS int muxfs_working_push(dind);
-MUXFS int muxfs_working_pop(dind);
+MUXFS int muxfs_working_pop(dind, time_t);
+
+MUXFS int muxfs_restoring_push(dind);
+MUXFS int muxfs_restoring_pop(dind);
 
 MUXFS int muxfs_degraded_set(dind);
 MUXFS int muxfs_degraded_clear(dind);
-
-MUXFS void muxfs_restore_now(void);
 
 /* desc.c */
 typedef uint64_t muxfs_desc_type;
@@ -189,6 +190,11 @@ MUXFS int  muxfs_desc_chk_symlink_content(struct muxfs_desc *, dind,
 MUXFS int  muxfs_desc_chk_node_content(struct muxfs_desc *, dind, const char *);
 MUXFS void muxfs_desc_chk_meta(uint8_t *, const struct muxfs_desc *,
     enum muxfs_chk_alg_type);
+
+/* format.c */
+MUXFS int muxfs_dev_format(const char *, enum muxfs_chk_alg_type, size_t,
+    size_t, time_t, const uint8_t *);
+MUXFS int muxfs_format_main(int, char *[]);
 
 /* lfile.c */
 struct muxfs_range {
@@ -215,15 +221,29 @@ MUXFS int muxfs_lfile_ancestors_recompute(uint8_t *, int,
 MUXFS int muxfs_lfile_readback(uint8_t *, dind, const char *, size_t, size_t,
     const uint8_t *);
 
+/* mount.c */
+MUXFS int muxfs_mount_main(int, char *[]);
+
+/* scan.c */
+enum muxfs_scan_mode {
+	MUXFS_SCAN_AUDIT,
+	MUXFS_SCAN_HEAL,
+};
+MUXFS int muxfs_scan_main(enum muxfs_scan_mode, int, char *[]);
+
 /* state.c */
+MUXFS int  muxfs_init(int);
+MUXFS int  muxfs_final(void);
 MUXFS int  muxfs_state_syslog_init(void);
 MUXFS int  muxfs_state_syslog_final(void);
+MUXFS void muxfs_debug(const char *, ...);
 MUXFS void muxfs_info(const char *, ...);
 MUXFS void muxfs_warn(const char *, ...);
 MUXFS void muxfs_alert(const char *, ...);
 
 MUXFS int  muxfs_state_restore_queue_init(void);
 MUXFS void muxfs_state_restore_queue_final(void);
+MUXFS int  muxfs_state_restore_only_set(dind);
 MUXFS int  muxfs_state_restore_push_back(dind, const char *);
 MUXFS int  muxfs_state_restore_next_path_len(size_t *);
 MUXFS int  muxfs_state_restore_pop_front(dind *, char *);
@@ -231,6 +251,9 @@ MUXFS int  muxfs_state_restore_pop_front(dind *, char *);
 MUXFS int muxfs_state_eno_next_init(uint64_t);
 MUXFS int muxfs_state_eno_next_acquire(uint64_t *);
 MUXFS int muxfs_state_eno_next_return(uint64_t);
+
+/* sync.c */
+MUXFS int muxfs_sync_main(int, char *[]);
 
 /* util.c */
 enum muxfs_cud_type {
@@ -254,13 +277,11 @@ struct muxfs_args {
 	char	dev_paths[MUXFS_DEV_COUNT_MAX][PATH_MAX];
 	size_t	dev_count;
 	int f;
-	int a;
 };
 extern struct muxfs_args muxfs_cmdline;
 MUXFS int muxfs_parse_args(int, char **, int);
-MUXFS void muxfs_mount_usage(void);
-MUXFS void muxfs_fsck_usage(void);
 MUXFS int muxfs_existsat(int *, int , const char *);
+MUXFS int muxfs_dir_is_empty(int *, char const *);
 MUXFS int muxfs_path_sanitize(const char **);
 MUXFS int muxfs_path_pop(const char **, char *, size_t *);
 MUXFS int muxfs_pushdir(struct muxfs_dir *, int, const char *);
@@ -274,8 +295,10 @@ MUXFS int muxfs_parent_gid(gid_t *, const char *);
 MUXFS int muxfs_dir_content_chk(uint8_t *, dind, struct muxfs_dir *);
 MUXFS size_t muxfs_align_up(size_t, size_t);
 MUXFS size_t muxfs_align_down(size_t, size_t);
+MUXFS void muxfs_restore_now(void);
 
 /* version.c */
 extern struct muxfs_version muxfs_program_version;
+MUXFS void muxfs_version_print(void);
 
 #endif /* _MUXFS_H_ */

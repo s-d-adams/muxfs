@@ -1,6 +1,6 @@
 /* state.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,11 +19,13 @@
 
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
 #include <unistd.h>
 
+#include "ds.h"
 #include "muxfs.h"
 
 struct muxfs_restore_item {
@@ -37,6 +39,8 @@ struct muxfs_state {
 	size_t restore_queue_size;
 	uint64_t next_eno;
 	struct syslog_data log;
+	int is_restore_only;
+	dind restore_only_dind;
 };
 
 static struct muxfs_state muxfs_global_state;
@@ -60,6 +64,10 @@ muxfs_state_restore_push_back(dind dev_index, const char *path)
 	size_t *qsz, next_offset;
 
 	muxfs_warn("Corrupted: %lu:/%s\n", dev_index, path);
+
+	if (muxfs_global_state.is_restore_only &&
+	    (dev_index != muxfs_global_state.restore_only_dind))
+		return 0;
 
 	q = &muxfs_global_state.restore_queue;
 	qsz = &muxfs_global_state.restore_queue_size;
@@ -146,6 +154,9 @@ muxfs_state_restore_queue_init(void)
 
 	state->front = state->back = state->restore_queue;
 
+	state->is_restore_only = 0;
+	state->restore_only_dind = 0;
+
 	return 0;
 }
 
@@ -198,7 +209,7 @@ MUXFS int
 muxfs_state_syslog_init(void)
 {
 	muxfs_global_state.log = (struct syslog_data)SYSLOG_DATA_INIT;
-	openlog_r("muxfs", LOG_PID|LOG_NDELAY, LOG_DAEMON,
+	openlog_r("muxfs", LOG_PID|LOG_NDELAY, LOG_USER,
 	    &muxfs_global_state.log);
 	return 0;
 }
@@ -208,6 +219,16 @@ muxfs_state_syslog_final(void)
 {
 	closelog_r(&muxfs_global_state.log);
 	return 0;
+}
+
+MUXFS void
+muxfs_debug(const char *msg, ...)
+{
+	va_list va_args;
+
+	va_start(va_args, msg);
+	vsyslog_r(LOG_DEBUG, &muxfs_global_state.log, msg, va_args);
+	va_end(va_args);
 }
 
 MUXFS void
@@ -238,4 +259,75 @@ muxfs_alert(const char *msg, ...)
 	va_start(va_args, msg);
 	vsyslog_r(LOG_ALERT, &muxfs_global_state.log, msg, va_args);
 	va_end(va_args);
+}
+
+/* Assumes that muxfs_dsinit() has already been called. */
+MUXFS int
+muxfs_init(int skip_first_mount)
+{
+	uint64_t next_eno, max_next_eno;
+	dind i, j, mnts;
+	struct muxfs_args *args;
+
+	args = &muxfs_cmdline;
+
+	muxfs_dev_module_init();
+	if (muxfs_state_restore_queue_init())
+		exit(-1);
+
+	mnts = 0;
+	max_next_eno = 0;
+	for (i = 0; i < args->dev_count; ++i) {
+		if (muxfs_dev_append(&j, args->dev_paths[i]))
+			exit(-1);
+		if (skip_first_mount && (i == 0))
+			continue;
+		if (muxfs_dev_mount(j, 0)) {
+			dprintf(2, "Error: Unable to mount %s.\n",
+			    args->dev_paths[i]);
+			exit(1);
+		}
+		if (muxfs_assign_peek_next_eno(&next_eno, mnts))
+			exit(-1);
+		++mnts;
+		if (next_eno > max_next_eno)
+			max_next_eno = next_eno;
+	}
+	if (mnts == 0)
+		exit(-1);
+
+	if (muxfs_state_eno_next_init(max_next_eno))
+		exit(-1);
+
+	return 0;
+}
+
+MUXFS int
+muxfs_final(void)
+{
+	dind i, j, dev_count;
+
+	dev_count = muxfs_dev_count();
+	for (i = dev_count; i > 0; --i) {
+		j = i - 1;
+		if (muxfs_dev_is_mounted(j)) {
+			if (muxfs_dev_unmount(j))
+				exit(-1);
+		}
+	}
+	muxfs_state_restore_queue_final();
+	if (muxfs_state_syslog_final())
+		exit(-1);
+	if (muxfs_dsfinal())
+		exit(-1);
+
+	return 0;
+}
+
+MUXFS int
+muxfs_state_restore_only_set(dind dev_index)
+{
+	muxfs_global_state.restore_only_dind = dev_index;
+	muxfs_global_state.is_restore_only = 1;
+	return 0;
 }

@@ -1,6 +1,6 @@
 /* desc.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -43,7 +43,7 @@ muxfs_desc_chk_reg_content(struct muxfs_desc *desc, dind dev_index,
 
 	rc = 1;
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		return 1;
 	alg = dev->conf.chk_alg_type;
 
@@ -83,7 +83,7 @@ muxfs_desc_chk_dir_content(struct muxfs_desc *desc, dind dev_index,
 	struct muxfs_dev *dev;
 	struct muxfs_dir dir;
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		return 1;
 
 	if ((fd = openat(dev->root_fd, path, O_RDONLY|O_NOFOLLOW))
@@ -109,7 +109,7 @@ muxfs_desc_chk_symlink_content(struct muxfs_desc *desc, dind dev_index,
 	ssize_t lnksz;
 	char lnkbuf[PATH_MAX];
 
-	if (muxfs_dev_get(&dev, dev_index))
+	if (muxfs_dev_get(&dev, dev_index, 0))
 		return 1;
 	fd = dev->root_fd;
 	alg = dev->conf.chk_alg_type;

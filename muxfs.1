@@ -1,0 +1,233 @@
+.\" Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
+.\" 
+.\" Permission to use, copy, modify, and distribute this software for any
+.\" purpose with or without fee is hereby granted, provided that the above
+.\" copyright notice and this permission notice appear in all copies.
+.\" 
+.\" THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+.\" WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+.\" MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+.\" ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+.\" WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+.\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+.\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+.\"
+.Dd $Mdocdate: July 8 2022 $
+.Dt MUXFS 1
+.Os
+.Sh NAME
+.Nm muxfs
+.Nd the Multiplexed File System
+.Sh SYNOPSIS
+.Nm muxfs
+.Cm format
+.Op Fl a Ar checksum_algorithm
+.Ar directory ...
+.Nm muxfs
+.Cm mount
+.Op Fl f
+.Ar mount_point
+.Ar directory ...
+.Nm muxfs
+.Cm audit
+.Ar directory ...
+.Nm muxfs
+.Cm heal
+.Ar directory ...
+.Nm muxfs
+.Cm sync
+.Ar destination
+.Ar source ...
+.Nm muxfs
+.Cm version
+.Sh DESCRIPTION
+.Nm
+is a mirroring, checksumming, and self-healing filesystem layer for OpenBSD.
+It mirrors a filesystem tree across a series of directories, and employs
+checksum databases to validate and restore files automatically.
+.Pp
+In addition to the file content, metadata is checksummed, including: owner,
+group, mode, (external) inode number, and for regular files the file size.  For
+directories the checksummed content includes the filenames and corresponding
+checksums of the files in the directory.  For symbolic links the checksummed
+content is the path output by
+.Xr readlink 2 .
+.Sh COMMANDS
+During an
+.Cm audit ,
+.Cm heal ,
+or
+.Cm sync
+the
+.Nm
+array must not be mounted.
+.Bl -tag -width Ds
+.It Cm format Oo Fl a Ar checksum_algorithm Oc Ar directory ...
+Format the directories as part of a new
+.Nm
+array.  The
+.Ar checksum_algorithm
+may be
+.Cm crc32 ,
+.Cm md5 ,
+or
+.Cm sha1 ,
+and defaults to
+.Cm md5 .
+The directories must be empty and non-overlapping.
+.It Cm mount Oo Fl f Oc Ar mount_point Ar directory ...
+Mount the directories as a redundant array at
+.Ar mount_point .
+If
+.Fl f
+is specified then
+.Nm
+remains in the foreground.
+.It Cm audit Ar directory ...
+If the directories are out-of-sync write a warning to the standard error and exit, otherwise for each
+.Ar directory
+read and check the checksums of all filesystem nodes in the
+.Ar directory ,
+and write to the standard output the paths of the filesystem nodes that do not
+match.
+.It Cm heal Ar directory ...
+Perform an
+.Cm audit
+and attempt to restore the filesystem nodes found to be corrupted using the
+corresponding copies in the other directories.
+.It Cm sync Ar destination Ar source ...
+Restore the directory
+.Ar destination
+to match the state of the
+.Ar source
+directories.
+.It Cm version
+Display the program version and exit.
+.Sh EXIT STATUS
+.Nm
+exits with one of the following exit status values: 
+.Pp
+.Bl -tag -width Ds -offset indent -compact
+.It 0
+success
+.It 1
+incorrect usage
+.It 255
+error
+.Sh EXAMPLES
+Create a new
+.Nm
+array from the filesystems mounted at
+.Pa /mnt/a
+and
+.Pa /mnt/b
+using the
+.Cm sha1
+checksum algorithm:
+.Bd -literal -offset indent
+# muxfs format -a sha1 /mnt/a /mnt/b
+.Ed
+.Pp
+Mount the
+.Nm
+array consisting of directories
+.Pa /mnt/a
+and
+.Pa /mnt/b
+to the mount-point
+.Pa /mnt/mp :
+.Bd -literal -offset indent
+# muxfs mount /mnt/mp /mnt/a /mnt/b
+.Ed
+.Pp
+Unmount the
+.Nm
+array:
+.Bd -literal -offset indent
+# umount /mnt/mp
+.Ed
+.Pp
+To perform an
+.Cm audit
+or
+.Cm heal
+operation the array must not be mounted.
+.Pp
+Audit the
+.Nm
+array:
+.Bd -literal -offset indent
+# muxfs audit /mnt/a /mnt/b
+.Ed
+.Pp
+Heal the
+.Nm
+array:
+.Bd -literal -offset indent
+# muxfs heal /mnt/a /mnt/b
+.Ed
+.Pp
+Re-sync corrupted
+.Pa /mnt/b
+to state of
+.Pa /mnt/a
+after loss of power:
+.Bd -literal -offset indent
+# muxfs sync /mnt/b /mnt/a
+.Ed
+.Pp
+Create or update a backup of the array to
+.Pa /mnt/c ,
+the mount-point of a filesystem on a detachable disk:
+.Bd -literal -offset indent
+# muxfs sync /mnt/c /mnt/a /mnt/b
+.Ed
+.Sh CAVEATS
+.Nm
+supports regular files, directories, and symbolic links, and does not support
+special files, device nodes, file locking, or hard-linking.  Timestamps are not
+included in the checksummed metadata.
+.Pp
+Filesystem nodes named
+.Pa .muxfs
+are reserved for use by
+.Nm .
+.Pp
+.Nm
+relies on the uniqueness of inode numbers within each directory to perform
+correctly, therefore the mounting of filesystems within array directories is
+not supported, with the exception of the
+.Pa .muxfs
+directories.
+.Pp
+To mitigate hard drive head thrashing the top-level
+.Pa .muxfs
+directories may be moved to solid state storage then mounted back to their
+original locations.
+.Pp
+.Nm
+relies on writing sequentially to multiple directories to mitigate corruption
+during unexpected of loss of power.  After such an event the administrator must
+.Cm sync
+the array from one or more of the uncorrupted directories before mounting it.
+Due to this it is not recommended to use muxfs with only one directory in the
+array.
+.Pp
+For privacy between users
+.Xr syslog 3
+messages are sent to the
+.Sq user
+facility.  To receive these messages an entry must be set up in
+.Xr syslog.conf 5 .
+Ensure that the corresponding log file is not readable by other.  The log
+messages include notifications of files found to be corrupted and the success
+or failure of file restoration attempts.
+.Pp
+The size of the
+.Nm
+database is proportional to the value of the largest (internal) inode number
+encountered.  To minimize this dedicate whole filesystems to the
+.Nm
+array.
+.Sh AUTHORS
+.An Stephen D. Adams Aq Mt stephen@sdadams.org

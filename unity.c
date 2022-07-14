@@ -1,6 +1,6 @@
-/* newfs_muxfs_unity.c */
+/* unity.c */
 /*
- * Copyright (c) 2022 Stephen D Adams <s.d.adams.software@gmail.com>
+ * Copyright (c) 2022 Stephen D. Adams <stephen@sdadams.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -24,8 +24,13 @@
 #else
 #include "ds.c"
 #endif
+#include "format.c"
 #include "lfile.c"
+#include "ops.c"
 #include "state.c"
 #include "util.c"
 #include "version.c"
-#include "newfs_muxfs.c"
+#include "mount.c"
+#include "scan.c"
+#include "sync.c"
+#include "muxfs.c"

@@ -1,3 +1,17 @@
+0.3-current (2022-07-14):
+* Replaced the multiple binaries with a single binary with sub-commands.
+* Renamed "newfs_muxfs" to "muxfs format".
+* Renamed "fsck_muxfs" to "muxfs heal"
+* Renamed "fsck_muxfs -a" to "muxfs audit".
+* Added the command "sync" to allow for drive replacement.
+* Replaced the array of UUIDs in the conf with single UUID for the whole-array.
+* Added a "restoring" field to the state.db file.
+* Added manual page.
+* Updated README and GLOSSARY.
+* Added checking of sequence numbers before mount, audit, and heal.
+* Replaced first-come-first-serve statfs() with aggregated statfs().
+* Bug fixes.
+
 0.2-current (2022-06-28):
 * Optimization for large files.
 * Added fsck_muxfs.
