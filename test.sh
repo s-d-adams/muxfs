@@ -15,7 +15,7 @@ testsuite_init() {
 	then	echo 'muxfs already running'
 		exit 1
 	fi
-	rm -r "${test_tmp}" "${dev_a}" "${dev_b}" "${mp}" \
+	rm -r "${test_tmp}" "${dev_a}" "${dev_b}" "${dev_c}" "${mp}" \
 	    >/dev/null 2>&1 || true
 	mkdir "${mp}"
 }
@@ -363,8 +363,67 @@ test_permissions() {
 	run_tests "${permission_tests}"
 }
 
+test_audit() {
+	mkdir "${dev_a}" "${dev_b}" "${test_tmp}"
+	echo 'test line 1' >"${test_tmp}/tmp1"
+	./muxfs format -a "${chk_alg}" "${dev_a}" "${dev_b}"
+	./muxfs mount "${mp}" "${dev_a}" "${dev_b}"
+	sleep 0.01
+	echo 'foo1' >"${mp}/r1"
+	mkdir "${mp}/d1"
+	echo 'foo2' >"${mp}/d1/r2"
+	ln -s "${test_tmp}/tmp1" "${mp}/d1/l1"
+	umount "${mp}"
+	echo 'badline' >>"${dev_a}/d1/r2"
+	./muxfs audit "${dev_a}" "${dev_b}" |
+	    grep "^${dev_a}/d1/r2\$" >/dev/null
+	rm -r "${dev_a}" "${dev_b}" "${test_tmp}"
+}
+test_heal() {
+	mkdir "${dev_a}" "${dev_b}" "${test_tmp}"
+	echo 'test line 1' >"${test_tmp}/tmp1"
+	./muxfs format -a "${chk_alg}" "${dev_a}" "${dev_b}"
+	./muxfs mount "${mp}" "${dev_a}" "${dev_b}"
+	sleep 0.01
+	echo 'foo1' >"${mp}/r1"
+	mkdir "${mp}/d1"
+	echo 'foo2' >"${mp}/d1/r2"
+	ln -s "${test_tmp}/tmp1" "${mp}/d1/l1"
+	umount "${mp}"
+	echo 'badline' >>"${dev_a}/d1/r2"
+	./muxfs heal "${dev_a}" "${dev_b}" |
+	    grep "^${dev_a}/d1/r2\$" >/dev/null
+	diff -r -x '.muxfs' "${dev_a}" "${dev_b}"
+	rm -r "${dev_a}" "${dev_b}" "${test_tmp}"
+}
+test_sync() {
+	mkdir "${dev_a}" "${dev_b}" "${dev_c}" "${test_tmp}"
+	echo 'test line 1' >"${test_tmp}/tmp1"
+	./muxfs format -a "${chk_alg}" "${dev_a}" "${dev_b}"
+	./muxfs mount "${mp}" "${dev_a}" "${dev_b}"
+	sleep 0.01
+	echo 'foo1' >"${mp}/r1"
+	mkdir "${mp}/d1"
+	echo 'foo2' >"${mp}/d1/r2"
+	ln -s "${test_tmp}/tmp1" "${mp}/d1/l1"
+	umount "${mp}"
+	./muxfs sync "${dev_c}" "${dev_a}" "${dev_b}"
+	diff -r -x '.muxfs' "${dev_c}" "${dev_a}"
+	diff -r -x '.muxfs' "${dev_c}" "${dev_b}"
+	rm -r "${dev_a}" "${dev_b}" "${dev_c}" "${test_tmp}"
+}
+
+extra_tests='test_audit test_heal test_sync'
+
+test_extras() {
+	for t in ${extra_tests}
+	do	echo ${t}
+		${t}
+	done
+}
+
 all_tests='test_basics test_resiliance test_restoration test_negatives '\
-'test_permissions'
+'test_permissions test_extras'
 
 test_all() {
 	for t in ${all_tests}

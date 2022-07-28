@@ -287,7 +287,7 @@ muxfs_init(int skip_first_mount)
 			    args->dev_paths[i]);
 			exit(1);
 		}
-		if (muxfs_assign_peek_next_eno(&next_eno, mnts))
+		if (muxfs_assign_peek_next_eno(&next_eno, j))
 			exit(-1);
 		++mnts;
 		if (next_eno > max_next_eno)

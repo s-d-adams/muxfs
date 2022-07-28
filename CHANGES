@@ -1,3 +1,7 @@
+0.4-current (2022-07-28):
+* Added tests for audit, heal, and sync.
+* Bug fixes.
+
 0.3-current (2022-07-14):
 * Replaced the multiple binaries with a single binary with sub-commands.
 * Renamed "newfs_muxfs" to "muxfs format".

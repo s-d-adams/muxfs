@@ -729,6 +729,7 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 	int exists;
 
 	rc = 1;
+	subfd = -1;
 
 	if (muxfs_dev_get(&ddev, ddev_index, 0))
 		goto out;
@@ -738,24 +739,35 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 	chksz = muxfs_chk_size(alg);
 	pathlen = strlen(path);
 
-	if (fstatat(ddev->root_fd, path, &dst, AT_SYMLINK_NOFOLLOW))
-		goto out;
-	if (!S_ISDIR(dst.st_mode)) {
-		if (!(S_ISREG(dst.st_mode) || S_ISLNK(dst.st_mode)))
+	if (fstatat(ddev->root_fd, path, &dst, AT_SYMLINK_NOFOLLOW)) {
+		if (errno != ENOENT)
 			goto out;
-		if (unlinkat(ddev->root_fd, path, 0))
-			goto out;
+		exists = 0;
+	} else {
+		exists = 1;
+		if (!S_ISDIR(dst.st_mode)) {
+			if (!(S_ISREG(dst.st_mode) || S_ISLNK(dst.st_mode)))
+				goto out;
+			if (unlinkat(ddev->root_fd, path, 0))
+				goto out;
+			exists = 0;
+		}
 	}
 
-	if (muxfs_existsat(&exists, ddev->root_fd, path))
-		goto out;
 	if (!exists) {
 		if (mkdirat(ddev->root_fd, path, sst->st_mode))
 			goto out;
-		if (fchownat(ddev->root_fd, path, sst->st_uid, sst->st_gid,
-		    AT_SYMLINK_NOFOLLOW))
-			goto out;
 	}
+
+	/* Chmod first to prevent privilege escalation. */
+	if (fchmodat(ddev->root_fd, path, sst->st_mode, AT_SYMLINK_NOFOLLOW))
+		goto out;
+	if (fchownat(ddev->root_fd, path, sst->st_uid, sst->st_gid,
+	    AT_SYMLINK_NOFOLLOW))
+		goto out;
+	/* Chmod again since chown can unset suid/sgid bits. */
+	if (fchmodat(ddev->root_fd, path, sst->st_mode, AT_SYMLINK_NOFOLLOW))
+		goto out;
 
 	if (muxfs_pushdir(&dir, sdev->root_fd, path))
 		goto out;
@@ -809,36 +821,44 @@ muxfs_restore_dir(dind ddev_index, dind sdev_index, const char *path,
 		subino = subst.st_ino;
 		if (muxfs_meta_read(&submeta, sdev_index, subino))
 			goto out2;
-		if ((subfd = openat(sdev->root_fd, pathbuf,
-		    O_RDONLY|O_NOFOLLOW))
-		    == -1)
-			goto out2;
-		if (S_ISDIR(subst.st_mode)) {
-			if (muxfs_restore_dir(ddev_index, sdev_index, pathbuf,
-			    subfd, &subst, &submeta))
-				goto subout;
-		} else if (S_ISREG(subst.st_mode)) {
-			if (muxfs_restore_reg(ddev_index, sdev_index, pathbuf,
-			    subfd, &subst, &submeta))
-				goto subout;
-		} else if (S_ISLNK(subst.st_mode)) {
+		if (S_ISLNK(subst.st_mode)) {
 			if (muxfs_restore_symlink(ddev_index, sdev_index,
 			    pathbuf, &subst, &submeta))
 				goto subout;
 		} else {
-			if (muxfs_state_restore_push_back(sdev_index, pathbuf))
-				exit(-1);
-			goto subout;
+			if ((subfd = openat(sdev->root_fd, pathbuf,
+			    O_RDONLY|O_NOFOLLOW)) == -1)
+				goto out2;
+			if (S_ISDIR(subst.st_mode)) {
+				if (muxfs_restore_dir(ddev_index, sdev_index,
+				    pathbuf, subfd, &subst, &submeta))
+					goto subout;
+			} else if (S_ISREG(subst.st_mode)) {
+				if (muxfs_restore_reg(ddev_index, sdev_index,
+				    pathbuf, subfd, &subst, &submeta))
+					goto subout;
+			} else {
+				if (muxfs_state_restore_push_back(sdev_index,
+				    pathbuf))
+					exit(-1);
+				goto subout;
+			}
 		}
 		if (muxfs_readback(ddev_index, pathbuf, 0, &submeta))
 			goto subout;
 		
-		if (close(subfd))
-			exit(-1);
+		if (subfd != -1) {
+			if (close(subfd))
+				exit(-1);
+			subfd = -1;
+		}
 		continue;
 subout:
-		if (close(subfd))
-			exit(-1);
+		if (subfd != -1) {
+			if (close(subfd))
+				exit(-1);
+			subfd = -1;
+		}
 		goto out2;
 	}
 
@@ -1320,10 +1340,12 @@ muxfs_restore_possible(int *is_delete_out, dind ddev_index, dind sdev_index,
 			ppath = ".";
 			ppathlen = strlen(ppath);
 			is_last = 1;
-		}
+		} else
+			patch.fname = fname;
 
 		subrc = muxfs_restore_possible_inner((is_first ? &is_delete :
-		    NULL), ddev_index, sdev_index, path, ddev, sdev, alg, chksz,		    ppath, &patch, !is_first);
+		    NULL), ddev_index, sdev_index, path, ddev, sdev, alg, chksz,
+		    ppath, &patch, !is_first);
 
 		switch (subrc) {
 		case 0:

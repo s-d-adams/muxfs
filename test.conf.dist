@@ -14,6 +14,9 @@ dev_a=
 # The path for the second 'dev' in the array.
 dev_b=
 
+# The path for an occasionally used third 'dev' in the array.
+dev_c=
+
 # A directory outside of the mount-point and the 'dev's used to store temporary
 # files.
 test_tmp=
