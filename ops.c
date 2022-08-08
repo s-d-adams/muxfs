@@ -32,15 +32,26 @@
 #include "muxfs.h"
 #include "gen.h"
 
+static void muxfs_wrbuf_flush(void);
+
 static void
 muxfs_eids_set(void)
 {
-	struct fuse_context *fuse_ctx;
+	struct fuse_context *fc;
 
-	fuse_ctx = fuse_get_context();
-	if (setegid(fuse_ctx->gid))
+	fc = fuse_get_context();
+	if (setegid(fc->gid))
 		exit(-1);
-	if (seteuid(fuse_ctx->uid))
+	if (seteuid(fc->uid))
+		exit(-1);
+}
+
+static void
+muxfs_eids_wrctx_set(const struct muxfs_wrctx *wc)
+{
+	if (setegid(wc->group))
+		exit(-1);
+	if (seteuid(wc->user))
 		exit(-1);
 }
 
@@ -62,6 +73,8 @@ muxfs_statfs(const char *path, struct statvfs *stvfs)
 	struct statvfs st, st_agg;
 	int has_st;
 	size_t sz;
+
+	muxfs_wrbuf_flush();
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -139,6 +152,7 @@ muxfs_fuse_init(struct fuse_conn_info *fci)
 static void
 muxfs_fuse_destroy(void *data)
 {
+	muxfs_wrbuf_flush();
 	muxfs_info("Unmounting");
 	if (muxfs_final())
 		exit(-1);
@@ -151,6 +165,7 @@ muxfs_fsync(const char *path, int datasync, struct fuse_file_info *ffi)
 	 * A call to fsync(2) is made as part of the create, update, and delete
 	 * operations.
 	 */
+	muxfs_wrbuf_flush();
 	return 0;
 }
 
@@ -160,6 +175,8 @@ muxfs_open(const char *path, struct fuse_file_info *ffi)
 	dind dev_count, i;
 	struct muxfs_dev *dev;
 	int fd, err;
+
+	muxfs_wrbuf_flush();
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -189,6 +206,8 @@ muxfs_opendir(const char *path, struct fuse_file_info *ffi)
 	struct muxfs_dev *dev;
 	int fd, err;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -213,12 +232,14 @@ muxfs_opendir(const char *path, struct fuse_file_info *ffi)
 static int
 muxfs_flush(const char *path, struct fuse_file_info *ffi)
 {
+	muxfs_wrbuf_flush();
 	return 0;
 }
 
 static int
 muxfs_release(const char *path, struct fuse_file_info *ffi)
 {
+	muxfs_wrbuf_flush();
 	return 0;
 }
 
@@ -251,7 +272,7 @@ struct muxfs_op_create_args {
 static int
 muxfs_op_create(struct muxfs_op_create_args *args)
 {
-	struct fuse_context *fuse_ctx;
+	struct fuse_context *fc;
 
 	dind dev_count, i;
 	struct muxfs_dev *dev;
@@ -277,7 +298,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 
 	mode_t			 old_umask;
 
-	fuse_ctx = fuse_get_context();
+	fc = fuse_get_context();
 
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
@@ -302,9 +323,9 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 
 		desc = (struct muxfs_desc) {
 			.eno = eno,
-			.owner = fuse_ctx->uid,
+			.owner = fc->uid,
 			.group = parent_gid,
-			.mode = args->mode & ~(fuse_ctx->umask),
+			.mode = args->mode & ~(fc->umask),
 			.size = 0,
 		};
 		if (muxfs_desc_type_from_mode(&desc.type, args->mode)) {
@@ -328,7 +349,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 		case MUXFS_CT_MKNOD:
 			if (S_ISREG(args->mode)) {
 				muxfs_eids_set();
-				old_umask = umask(fuse_ctx->umask);
+				old_umask = umask(fc->umask);
 				subfd = openat(fd, args->path,
 				    O_RDWR|O_CREAT|O_EXCL, args->mode);
 				err = errno;
@@ -347,7 +368,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			break;
 		case MUXFS_CT_MKDIR:
 			muxfs_eids_set();
-			old_umask = umask(fuse_ctx->umask);
+			old_umask = umask(fc->umask);
 			subrc = mkdirat(fd, args->path, args->mode);
 			err = errno;
 			umask(old_umask);
@@ -355,7 +376,7 @@ muxfs_op_create(struct muxfs_op_create_args *args)
 			break;
 		case MUXFS_CT_SYMLINK:
 			muxfs_eids_set();
-			old_umask = umask(fuse_ctx->umask);
+			old_umask = umask(fc->umask);
 			subrc = symlinkat(args->link_content, fd, args->path);
 			err = errno;
 			umask(old_umask);
@@ -427,6 +448,8 @@ muxfs_mknod(const char *path, mode_t mode, dev_t sys_dev)
 {
 	struct muxfs_op_create_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -443,6 +466,8 @@ muxfs_mkdir(const char *path, mode_t mode)
 {
 	struct muxfs_op_create_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -457,6 +482,8 @@ static int
 muxfs_symlink(const char *link_content, const char *path)
 {
 	struct muxfs_op_create_args args;
+
+	muxfs_wrbuf_flush();
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -631,6 +658,8 @@ early:
 static int
 muxfs_unlink(const char *path)
 {
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -640,6 +669,8 @@ muxfs_unlink(const char *path)
 static int
 muxfs_rmdir(const char *path)
 {
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -995,6 +1026,8 @@ muxfs_getattr(const char *path, struct stat *st_out)
 {
 	struct muxfs_op_read_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -1010,6 +1043,8 @@ muxfs_read(const char *path, char *buf_out, size_t size, off_t offset,
     struct fuse_file_info *ffi)
 {
 	struct muxfs_op_read_args args;
+
+	muxfs_wrbuf_flush();
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -1029,6 +1064,8 @@ muxfs_readlink(const char *path, char *buf_out, size_t size)
 {
 	struct muxfs_op_read_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -1045,6 +1082,8 @@ muxfs_readdir(const char *path, void *fill_data, fuse_fill_dir_t fill,
     off_t offset, struct fuse_file_info *ffi)
 {
 	struct muxfs_op_read_args args;
+
+	muxfs_wrbuf_flush();
 
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
@@ -1077,7 +1116,7 @@ struct muxfs_op_update_args {
 	off_t				 offset;
 	const char			*buf;
 	size_t				 bufsz;
-	struct fuse_file_info		*ffi;
+	const struct muxfs_wrctx	*wc;
 };
 
 static int
@@ -1365,7 +1404,8 @@ static int
 muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
     enum muxfs_chk_alg_type alg, size_t chksz, struct stat *st,
     struct muxfs_meta *prewr_meta, struct muxfs_meta *wr_meta,
-    struct muxfs_desc *wr_desc, int *err, int lfile_fd)
+    struct muxfs_desc *wr_desc, int *err, int lfile_fd,
+    const struct muxfs_wrctx *wc)
 {
 	int rc;
 	int fd;
@@ -1390,7 +1430,10 @@ muxfs_write_inner(int root_fd, struct muxfs_op_update_args *args,
 	lfile = MAP_FAILED;
 	r.lfilesz = 0;
 
-	muxfs_eids_set();
+	if (wc != NULL)
+		muxfs_eids_wrctx_set(wc);
+	else
+		muxfs_eids_set();
 	fd = openat(root_fd, args->path, O_RDWR|O_NOFOLLOW);
 	*err = errno;
 	muxfs_eids_reset();
@@ -1629,12 +1672,16 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 
 	time_t			 now;
 
+	const struct muxfs_wrctx	*wc;
+
 	if ((dev_count = muxfs_dev_count()) == 0)
 		return -EIO;
 
 	has_write = 0;
 
 	now = time(NULL);
+
+	wc = args->wc;
 
 	for (i = 0; i < dev_count; ++i) {
 		if (muxfs_dev_get(&dev, i, 0))
@@ -1645,7 +1692,10 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 		alg = dev->conf.chk_alg_type;
 		chksz = muxfs_chk_size(alg);
 
-		muxfs_eids_set();
+		if (wc != NULL)
+			muxfs_eids_wrctx_set(wc);
+		else
+			muxfs_eids_set();
 		subrc = fstatat(fd, args->path, &prewr_st, AT_SYMLINK_NOFOLLOW);
 		err = errno;
 		muxfs_eids_reset();
@@ -1716,7 +1766,7 @@ muxfs_op_update(struct muxfs_op_update_args *args)
 		case MUXFS_UT_WRITE:
 			subrc = muxfs_write_inner(fd, args, alg, chksz,
 			    &prewr_st, &prewr_meta, &wr_meta, &wr_desc, &err,
-			    dev->lfile_fd);
+			    dev->lfile_fd, wc);
 			break;
 		default:
 			exit(-1); /* Programming error. */
@@ -1848,6 +1898,8 @@ muxfs_rename(const char *from, const char *to)
 
 	time_t			 now;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&from))
 		return -EIO;
 	if (muxfs_path_sanitize(&to))
@@ -1968,12 +2020,15 @@ muxfs_chmod(const char *path, mode_t mode)
 {
 	struct muxfs_op_update_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
 	args.type = MUXFS_UT_CHMOD;
 	args.path = path;
 	args.mode = mode;
+	args.wc = NULL;
 
 	return muxfs_op_update(&args);
 }
@@ -1983,6 +2038,8 @@ muxfs_chown(const char *path, uid_t uid, gid_t gid)
 {
 	struct muxfs_op_update_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
@@ -1990,6 +2047,7 @@ muxfs_chown(const char *path, uid_t uid, gid_t gid)
 	args.path = path;
 	args.uid  = uid;
 	args.gid  = gid;
+	args.wc = NULL;
 
 	return muxfs_op_update(&args);
 }
@@ -1999,12 +2057,15 @@ muxfs_utimens(const char *path, const struct timespec *ts)
 {
 	struct muxfs_op_update_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
 	args.type = MUXFS_UT_UTIMENS;
 	args.path = path;
 	args.ts = ts;
+	args.wc = NULL;
 
 	return muxfs_op_update(&args);
 }
@@ -2014,14 +2075,124 @@ muxfs_truncate(const char *path, off_t offset)
 {
 	struct muxfs_op_update_args args;
 
+	muxfs_wrbuf_flush();
+
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
 	args.type = MUXFS_UT_TRUNCATE;
 	args.path = path;
 	args.offset = offset;
+	args.wc = NULL;
 
 	return muxfs_op_update(&args);
+}
+
+/* Returns 1 on error, return value of faccessat(2) otherwise. */
+static int
+muxfs_access(const char *path, int amode)
+{
+	dind			 dev_count;
+	dind			 i;
+	struct muxfs_dev	*dev;
+	int			 fd;
+	int			 subrc;
+
+	if ((dev_count = muxfs_dev_count()) == 0)
+		return 1;
+
+	for (i = 0; i < dev_count; ++i) {
+		if (muxfs_dev_get(&dev, i, 0))
+			continue;
+		fd = dev->root_fd;
+		muxfs_eids_set();
+		subrc = faccessat(fd, path, amode, AT_EACCESS);
+		muxfs_eids_reset();
+		return subrc;
+	}
+
+	return 1;
+}
+
+static void
+muxfs_wrbuf_flush(void)
+{
+	struct muxfs_op_update_args args;
+	const struct muxfs_wrbuf *wr;
+	int subrc;
+
+	if (!muxfs_state_wrbuf_is_set())
+		return;
+
+	if (muxfs_state_wrbuf_get(&wr))
+		exit(-1);
+
+	args.type = MUXFS_UT_WRITE;
+	args.path = wr->path;
+	args.buf = (const char *)wr->buf;
+	args.bufsz = wr->sz;
+	args.offset = wr->off;
+	args.wc = &wr->wc;
+
+	subrc = muxfs_op_update(&args);
+	if (subrc != wr->sz)
+		exit(-1);
+
+	if (muxfs_state_wrbuf_reset())
+		exit(-1);
+}
+
+static int
+muxfs_buffered_write_begin(const char *path, const char *buf, size_t bufsz,
+    off_t offset, struct fuse_context *fc)
+{
+	switch (muxfs_access(path, W_OK)) {
+	case 0:
+		break;
+	case 1:
+		exit(-1);
+	case -1:
+		/* Would prefer -EPERM but not listed in man page. */
+		return -EIO;
+	}
+	if (muxfs_state_wrbuf_set(path, fc->uid, fc->gid, bufsz, offset,
+	    (const uint8_t *)buf))
+		exit(-1);
+	return bufsz;
+}
+
+static int
+muxfs_buffered_write(const char *path, const char *buf, size_t bufsz,
+    off_t offset)
+{
+	struct fuse_context *fc;
+	size_t wrsz;
+
+	if (bufsz > MUXFS_WRBUF_SIZE)
+		exit(-1); /* Programming error. */
+
+	fc = fuse_get_context();
+
+	if (!muxfs_state_wrbuf_is_set()) {
+		return muxfs_buffered_write_begin(path, buf, bufsz, offset,
+		    fc);
+	}
+
+	if (!muxfs_state_wrbuf_append(&wrsz, path, fc->uid, fc->gid,
+	    bufsz, offset, (const uint8_t *)buf)) {
+		if (wrsz < bufsz) {
+			offset += wrsz;
+			bufsz -= wrsz;
+			muxfs_wrbuf_flush();
+			if (muxfs_state_wrbuf_set(path, fc->uid, fc->gid,
+			    bufsz, offset, (const uint8_t *)buf))
+				exit(-1);
+		}
+		return bufsz;
+	}
+
+	muxfs_wrbuf_flush();
+	return muxfs_buffered_write_begin(path, buf, bufsz, offset, fc);
 }
 
 static int
@@ -2033,12 +2204,17 @@ muxfs_write(const char *path, const char *buf, size_t bufsz, off_t offset,
 	if (muxfs_path_sanitize(&path))
 		return -EIO;
 
+	if (bufsz <= MUXFS_WRBUF_SIZE)
+		return muxfs_buffered_write(path, buf, bufsz, offset);
+
+	muxfs_wrbuf_flush();
+
 	args.type = MUXFS_UT_WRITE;
 	args.path = path;
 	args.buf = buf;
 	args.bufsz = bufsz;
 	args.offset = offset;
-	args.ffi = ffi;
+	args.wc = NULL;
 
 	return muxfs_op_update(&args);
 }
@@ -2051,9 +2227,6 @@ muxfs_fuse_ops = {
 	.init        = muxfs_fuse_init   ,
 	.destroy     = muxfs_fuse_destroy,
 	/* No-ops */
-	.fsync       = muxfs_fsync       ,
-	.flush       = muxfs_flush       ,
-	.release     = muxfs_release     ,
 	.releasedir  = muxfs_releasedir  ,
 	/* Create */
 	.mknod       = muxfs_mknod       ,
@@ -2067,6 +2240,9 @@ muxfs_fuse_ops = {
 	.readlink    = muxfs_readlink    ,
 	.readdir     = muxfs_readdir     ,
 	/* Update */
+	.fsync       = muxfs_fsync       ,
+	.flush       = muxfs_flush       ,
+	.release     = muxfs_release     ,
 	.rename      = muxfs_rename      ,
 	.chmod       = muxfs_chmod       ,
 	.chown       = muxfs_chown       ,

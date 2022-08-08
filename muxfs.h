@@ -36,6 +36,8 @@ struct stat;
 #define MUXFS_BLOCK_SIZE (4*1024)
 #define MUXFS_MEM_ALIGN (sizeof(uint64_t))
 #define MUXFS_UUID_SIZE 16
+#define MUXFS_WRBUF_SIZE (1024*1024)
+
 #define MUXFS_DT_REG 1u
 #define MUXFS_DT_DIR 2u
 #define MUXFS_DT_LNK 3u
@@ -208,9 +210,6 @@ struct muxfs_range {
 			blk_index_end;
 };
 MUXFS void muxfs_range_compute(struct muxfs_range *, size_t);
-MUXFS int muxfs_lfile_abs_range(uint64_t *, uint64_t *, uint64_t, uint64_t);
-MUXFS uint64_t muxfs_lfile_root_level(uint64_t);
-MUXFS uint64_t muxfs_lfile_root_abs_index(uint64_t);
 MUXFS int muxfs_lfile_open(int *, int, ino_t, int);
 MUXFS int muxfs_lfile_create(int, size_t, ino_t, size_t);
 MUXFS int muxfs_lfile_resize(int, size_t, ino_t, size_t, size_t);
@@ -232,6 +231,17 @@ enum muxfs_scan_mode {
 MUXFS int muxfs_scan_main(enum muxfs_scan_mode, int, char *[]);
 
 /* state.c */
+struct muxfs_wrctx {
+	uid_t user;
+	gid_t group;
+};
+struct muxfs_wrbuf {
+	char path[PATH_MAX];
+	struct muxfs_wrctx wc;
+	size_t sz;
+	size_t off;
+	uint8_t buf[MUXFS_WRBUF_SIZE];
+};
 MUXFS int  muxfs_init(int);
 MUXFS int  muxfs_final(void);
 MUXFS int  muxfs_state_syslog_init(void);
@@ -251,6 +261,14 @@ MUXFS int  muxfs_state_restore_pop_front(dind *, char *);
 MUXFS int muxfs_state_eno_next_init(uint64_t);
 MUXFS int muxfs_state_eno_next_acquire(uint64_t *);
 MUXFS int muxfs_state_eno_next_return(uint64_t);
+
+MUXFS int muxfs_state_wrbuf_is_set(void);
+MUXFS int muxfs_state_wrbuf_reset(void);
+MUXFS int muxfs_state_wrbuf_set(const char *, uid_t, gid_t, size_t,
+    size_t, const uint8_t *);
+MUXFS int muxfs_state_wrbuf_append(size_t *, const char *, uid_t, gid_t,
+    size_t, size_t, const uint8_t *);
+MUXFS int muxfs_state_wrbuf_get(const struct muxfs_wrbuf **);
 
 /* sync.c */
 MUXFS int muxfs_sync_main(int, char *[]);
@@ -281,6 +299,7 @@ struct muxfs_args {
 extern struct muxfs_args muxfs_cmdline;
 MUXFS int muxfs_parse_args(int, char **, int);
 MUXFS int muxfs_existsat(int *, int , const char *);
+MUXFS int muxfs_removeat(int, const char *);
 MUXFS int muxfs_dir_is_empty(int *, char const *);
 MUXFS int muxfs_path_sanitize(const char **);
 MUXFS int muxfs_path_pop(const char **, char *, size_t *);

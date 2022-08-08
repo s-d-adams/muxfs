@@ -29,7 +29,7 @@ muxfs_sync_usage(void)
 MUXFS int
 muxfs_sync_main(int argc, char *argv[])
 {
-	int empty;
+	int empty, exists;
 	struct muxfs_dev *ddev, *sdev;
 	const char *ddev_path;
 	enum muxfs_chk_alg_type alg;
@@ -89,6 +89,13 @@ muxfs_sync_main(int argc, char *argv[])
 	ddev->state.seq = sdev->state.seq;
 	if (muxfs_dev_state_write_fd(ddev->state_fd, &ddev->state))
 		exit(-1);
+
+	if (muxfs_existsat(&exists, ddev->root_fd, ".muxfs/rename.tmp"))
+		exit(-1);
+	if (exists) {
+		if (muxfs_removeat(ddev->root_fd, ".muxfs/rename.tmp"))
+			exit(-1);
+	}
 
 	if (muxfs_final())
 		exit(-1);

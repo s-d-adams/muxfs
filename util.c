@@ -686,7 +686,7 @@ dirout:
 	return 0;
 }
 
-static int
+MUXFS int
 muxfs_removeat(int fd, const char *_path)
 {
 	char	 path[PATH_MAX];

@@ -5,6 +5,7 @@ COMMON_CFLAGS=-std=c99 -pedantic -Wdeprecated -Wall -Wno-unused-function \
     -Werror
 CFLAGS=$(COMMON_CFLAGS) -O2 -DNDEBUG=1
 #CFLAGS=$(COMMON_CFLAGS) -O0 -g
+#CFLAGS=$(COMMON_CFLAGS) -O0 -g -pg -static
 CC=cc
 
 MKPROF=
@@ -38,7 +39,7 @@ incremental: muxfs_incremental
 unity: muxfs_unity
 
 gen: ds.h gen.c chk.h
-	${MKPROF} ${CC} ${CFLAGS} \
+	${MKPROF} ${CC} ${COMMON_CFLAGS} \
 	    -I. \
 	    -DMUXFS= \
 	    -DMUXFS_DEC=extern \

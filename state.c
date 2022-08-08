@@ -41,6 +41,7 @@ struct muxfs_state {
 	struct syslog_data log;
 	int is_restore_only;
 	dind restore_only_dind;
+	struct muxfs_wrbuf wr;
 };
 
 static struct muxfs_state muxfs_global_state;
@@ -299,6 +300,9 @@ muxfs_init(int skip_first_mount)
 	if (muxfs_state_eno_next_init(max_next_eno))
 		exit(-1);
 
+	if (muxfs_state_wrbuf_reset())
+		exit(-1);
+
 	return 0;
 }
 
@@ -329,5 +333,100 @@ muxfs_state_restore_only_set(dind dev_index)
 {
 	muxfs_global_state.restore_only_dind = dev_index;
 	muxfs_global_state.is_restore_only = 1;
+	return 0;
+}
+
+MUXFS int
+muxfs_state_wrbuf_is_set(void)
+{
+	return muxfs_global_state.wr.path[0] != '\0';
+}
+
+MUXFS int
+muxfs_state_wrbuf_reset(void)
+{
+	memset(&muxfs_global_state.wr, 0, sizeof(muxfs_global_state.wr));
+	return 0;
+}
+
+MUXFS int
+muxfs_state_wrbuf_set(const char *path, uid_t user, gid_t group, size_t sz,
+    size_t off, const uint8_t *buf)
+{
+	struct muxfs_wrbuf *wrbuf;
+
+	wrbuf = &muxfs_global_state.wr;
+
+	if (muxfs_state_wrbuf_is_set())
+		return 1;
+	if (path == NULL)
+		return 1;
+	if (path[0] == '\0')
+		return 1;
+	if (strlen(path) >= PATH_MAX)
+		return 1;
+	if (sz > MUXFS_WRBUF_SIZE)
+		return 1;
+	if (buf == NULL)
+		return 1;
+
+	*wrbuf = (struct muxfs_wrbuf) {
+		.wc = {
+			.user = user,
+			.group = group,
+		},
+		.sz = sz,
+		.off = off,
+	};
+	strcpy(wrbuf->path, path);
+	memcpy(wrbuf->buf, buf, sz);
+
+	return 0;
+}
+
+MUXFS int
+muxfs_state_wrbuf_append(size_t *wrsz_out, const char *path, uid_t user,
+    gid_t group, size_t sz, size_t off, const uint8_t *buf)
+{
+	struct muxfs_wrbuf *wrbuf;
+
+	wrbuf = &muxfs_global_state.wr;
+
+	if (!muxfs_state_wrbuf_is_set())
+		return 1;
+	if (path == NULL)
+		return 1;
+	if (path[0] == '\0')
+		return 1;
+	if (strlen(path) >= PATH_MAX)
+		return 1;
+	if (strcmp(wrbuf->path, path) != 0)
+		return 1;
+	if (wrbuf->wc.user != user)
+		return 1;
+	if (wrbuf->wc.group != group)
+		return 1;
+	if (off != (wrbuf->off + wrbuf->sz))
+		return 1;
+	if (buf == NULL)
+		return 1;
+	if (wrsz_out == NULL)
+		return 1;
+
+	if ((wrbuf->sz + sz) > MUXFS_WRBUF_SIZE)
+		sz = (MUXFS_WRBUF_SIZE - wrbuf->sz);
+	memcpy(&wrbuf->buf[wrbuf->sz], buf, sz);
+	wrbuf->sz += sz;
+	*wrsz_out = sz;
+
+	return 0;
+}
+
+MUXFS int
+muxfs_state_wrbuf_get(const struct muxfs_wrbuf **wrbuf_out)
+{
+	if (!muxfs_state_wrbuf_is_set())
+		return 1;
+	*wrbuf_out = &muxfs_global_state.wr;
 	return 0;
 }

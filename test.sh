@@ -144,6 +144,7 @@ test_rmdir() {
 test_lfile_write() {
 	dd status=none if=/dev/urandom "of=${test_tmp}/r" bs=1k count=7
 	cp "${test_tmp}/r" "${mp}/r"
+	sync
 	cmp -s "${test_tmp}/r" "${dev_a}/r"
 	cmp -s "${test_tmp}/r" "${dev_b}/r"
 	ls -l "${mp}" >/dev/null
@@ -158,6 +159,7 @@ test_lfile_truncate_large_to_small() {
 	dd status=none if=/dev/urandom "of=${test_tmp}/r" bs=1k count=7
 	cp "${test_tmp}/r" "${mp}/r"
 	echo 'foo' >"${mp}/r"
+	sync
 	test "$(<"${dev_a}/r")" == 'foo'
 	test "$(<"${dev_b}/r")" == 'foo'
 	ls -l "${mp}" >/dev/null
@@ -168,6 +170,7 @@ test_lfile_extend_large_to_larger() {
 	dd status=none if=/dev/urandom "of=${test_tmp}/r2" bs=1k count=4
 	cat "${test_tmp}/r2" >>"${test_tmp}/r"
 	cat "${test_tmp}/r2" >>"${mp}/r"
+	sync
 	cmp -s "${test_tmp}/r" "${dev_a}/r"
 	cmp -s "${test_tmp}/r" "${dev_b}/r"
 	ls -l "${mp}" >/dev/null
@@ -186,6 +189,7 @@ test_basics() {
 
 test_resiliance_reg() {
 	echo 'foo' >"${mp}/r"
+	sync
 	echo 'bad' >"${dev_a}/r"
 	test "$(<"${mp}/r")" == 'foo'
 }
@@ -197,6 +201,7 @@ test_resiliance_lnk() {
 test_resiliance_dir() {
 	mkdir "${mp}/d"
 	echo 'foo' >"${mp}/d/r"
+	sync
 	echo 'bar' >"${dev_a}/d/r"
 	mv "${dev_a}/d/r" "${dev_a}/d/bad"
 	test "$(ls "${mp}/d")" == 'r'
@@ -205,6 +210,7 @@ test_resiliance_dir() {
 test_resiliance_lfile() {
 	dd status=none if=/dev/urandom "of=${test_tmp}/r" bs=1k count=7
 	cp "${test_tmp}/r" "${mp}/r"
+	sync
 	echo 'bad' >"${dev_a}/r"
 	cmp -s "${test_tmp}/r" "${mp}/r"
 }
@@ -218,6 +224,7 @@ test_resiliance() {
 
 test_restoration_reg() {
 	echo 'foo' >"${mp}/r"
+	sync
 	echo 'bad' >"${dev_a}/r"
 	cat "${mp}/r" >/dev/null
 	test "$(<"${dev_a}/r")" == 'foo'
@@ -231,6 +238,7 @@ test_restoration_lnk() {
 test_restoration_dir() {
 	mkdir "${mp}/d"
 	echo 'foo' >"${mp}/d/r"
+	sync
 	echo 'bar' >"${dev_a}/d/r"
 	mv "${dev_a}/d/r" "${dev_a}/d/bad"
 	ls "${mp}/d" >/dev/null
@@ -239,6 +247,7 @@ test_restoration_dir() {
 }
 test_restoration_missing_reg() {
 	echo 'foo' >"${mp}/r"
+	sync
 	rm "${dev_a}/r"
 	cat "${mp}/r" >/dev/null
 	test "$(<"${dev_a}/r")" == 'foo'
@@ -246,6 +255,7 @@ test_restoration_missing_reg() {
 test_restoration_lfile() {
 	dd status=none if=/dev/urandom "of=${test_tmp}/r" bs=1k count=7
 	cp "${test_tmp}/r" "${mp}/r"
+	sync
 	echo 'bad' >"${dev_a}/r"
 	cat "${mp}/r" >/dev/null
 	cmp -s "${test_tmp}/r" "${dev_a}/r"

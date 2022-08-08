@@ -28,6 +28,8 @@
 #include "gen.h"
 #include "muxfs.h"
 
+#define MUXFS_LEVEL_FACTOR (MUXFS_BLOCK_SIZE / MUXFS_CHKSZ_MAX)
+
 MUXFS void
 muxfs_range_compute(struct muxfs_range *range_inout, size_t chksz)
 {
@@ -46,22 +48,27 @@ muxfs_range_compute(struct muxfs_range *range_inout, size_t chksz)
 	*range_inout = r;
 }
 
-MUXFS int
+static int
 muxfs_lfile_abs_range(uint64_t *index_out, uint64_t *count_out,
     uint64_t file_blk_count, uint64_t level)
 {
-	uint64_t n, l, i;
+	uint64_t n, n2, l, i;
 
 	if (file_blk_count == 0)
 		return 1;
 
 	i = 0;
 	n = file_blk_count;
+	for (n2 = 1; n2 < n; n2 *= 2);
+
 	for (l = 0; l < level; ++l) {
 		if ((n == 1) && ((level - 1) > l))
 			return 1;
-		i += n;
-		n = (n / 2) + (n % 2);
+		i += n2;
+		n = (n / MUXFS_LEVEL_FACTOR) +
+		    ((n % MUXFS_LEVEL_FACTOR) ? 1 : 0);
+		n2 = (n2 / MUXFS_LEVEL_FACTOR) +
+		    ((n2 % MUXFS_LEVEL_FACTOR) ? 1 : 0);
 	}
 
 	if (index_out)
@@ -71,7 +78,7 @@ muxfs_lfile_abs_range(uint64_t *index_out, uint64_t *count_out,
 	return 0;
 }
 
-MUXFS uint64_t
+static uint64_t
 muxfs_lfile_root_level(uint64_t file_blk_count)
 {
 	uint64_t n, l;
@@ -82,13 +89,14 @@ muxfs_lfile_root_level(uint64_t file_blk_count)
 	n = file_blk_count;
 	l = 0;
 	while (n != 1) {
-		n = (n / 2) + (n % 2);
+		n = (n / MUXFS_LEVEL_FACTOR) +
+		    ((n % MUXFS_LEVEL_FACTOR) ? 1 : 0);
 		++l;
 	}
 	return l;
 }
 
-MUXFS uint64_t
+static uint64_t
 muxfs_lfile_root_abs_index(uint64_t file_blk_count)
 {
 	uint64_t level, index;
@@ -132,7 +140,7 @@ MUXFS int
 muxfs_lfile_create(int lfile_fd, size_t chksz, ino_t ino, size_t filesz)
 {
 	int rc;
-	uint64_t blk_count;
+	uint64_t blk_count, blk_count2;
 	size_t lfilesz;
 	int path_len;
 	char path_buf[PATH_MAX];
@@ -142,6 +150,7 @@ muxfs_lfile_create(int lfile_fd, size_t chksz, ino_t ino, size_t filesz)
 
 	blk_count = (filesz / MUXFS_BLOCK_SIZE) +
 	    ((filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
+	for (blk_count2 = 1; blk_count2 < blk_count; blk_count2 *= 2);
 
 	lfilesz = chksz * (muxfs_lfile_root_abs_index(blk_count) + 1);
 
@@ -171,8 +180,8 @@ muxfs_lfile_grow(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
     size_t new_filesz)
 {
 	int rc;
-	uint64_t old_blk_count, new_blk_count;
-	size_t new_lfilesz;
+	uint64_t old_blk_count, new_blk_count, new_blk_count2;
+	size_t new_lfilesz, new_lfilesz2;
 	uint64_t old_root_level, l, old_index, new_index, old_count, new_count;
 	int fd;
 	uint8_t *lfile;
@@ -183,13 +192,16 @@ muxfs_lfile_grow(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
 	    ((old_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
 	new_blk_count = (new_filesz / MUXFS_BLOCK_SIZE) +
 	    ((new_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
+	for (new_blk_count2 = 1; new_blk_count2 < new_blk_count;
+	    new_blk_count2 *= 2);
 
 	new_lfilesz = chksz * (muxfs_lfile_root_abs_index(new_blk_count) + 1);
+	new_lfilesz2 = chksz * (muxfs_lfile_root_abs_index(new_blk_count2) + 1);
 	old_root_level = muxfs_lfile_root_level(old_blk_count);
 
 	if (muxfs_lfile_open(&fd, lfile_fd, ino, O_RDWR))
 		goto out;
-	if (ftruncate(fd, new_lfilesz))
+	if (ftruncate(fd, new_lfilesz2))
 		goto out2;
 	if ((lfile = mmap(NULL, new_lfilesz, PROT_READ|PROT_WRITE, MAP_SHARED,
 	    fd, 0)) == MAP_FAILED)
@@ -222,8 +234,8 @@ muxfs_lfile_shrink(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
     size_t new_filesz)
 {
 	int rc;
-	uint64_t old_blk_count, new_blk_count;
-	size_t old_lfilesz, new_lfilesz;
+	uint64_t old_blk_count, new_blk_count, new_blk_count2;
+	size_t old_lfilesz, new_lfilesz2;
 	uint64_t new_root_level, l, old_index, new_index, old_count, new_count;
 	int fd;
 	uint8_t *lfile;
@@ -235,9 +247,11 @@ muxfs_lfile_shrink(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
 	    ((old_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
 	new_blk_count = (new_filesz / MUXFS_BLOCK_SIZE) +
 	    ((new_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
+	for (new_blk_count2 = 1; new_blk_count2 < new_blk_count;
+	    new_blk_count2 *= 2);
 
 	old_lfilesz = chksz * (muxfs_lfile_root_abs_index(old_blk_count) + 1);
-	new_lfilesz = chksz * (muxfs_lfile_root_abs_index(new_blk_count) + 1);
+	new_lfilesz2 = chksz * (muxfs_lfile_root_abs_index(new_blk_count2) + 1);
 	new_root_level = muxfs_lfile_root_level(new_blk_count);
 
 	if (muxfs_lfile_open(&fd, lfile_fd, ino, O_RDWR))
@@ -257,17 +271,17 @@ muxfs_lfile_shrink(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
 		    new_count * chksz);
 	}
 
-	if (munmap(lfile, new_lfilesz))
+	if (munmap(lfile, old_lfilesz))
 		exit(-1);
 	lfile = MAP_FAILED;
 
-	if (ftruncate(fd, new_lfilesz))
+	if (ftruncate(fd, new_lfilesz2))
 		goto out2;
 
 	rc = 0;
 /*out3:*/
 	if (lfile != MAP_FAILED) {
-		if (munmap(lfile, new_lfilesz))
+		if (munmap(lfile, old_lfilesz))
 			exit(-1);
 	}
 out2:
@@ -281,9 +295,18 @@ MUXFS int
 muxfs_lfile_resize(int lfile_fd, size_t chksz, ino_t ino, size_t old_filesz,
     size_t new_filesz)
 {
-	if (new_filesz == old_filesz)
+	size_t n, o, n2, o2;
+
+	n = (new_filesz / MUXFS_BLOCK_SIZE) +
+	    ((new_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
+	o = (old_filesz / MUXFS_BLOCK_SIZE) +
+	    ((old_filesz % MUXFS_BLOCK_SIZE) ? 1 : 0);
+	for (n2 = 1; n2 < n; n2 *= 2);
+	for (o2 = 1; o2 < o; o2 *= 2);
+
+	if (n2 == o2)
 		return 0;
-	else if (new_filesz > old_filesz) {
+	else if (n2 > o2) {
 		return muxfs_lfile_grow(lfile_fd, chksz, ino, old_filesz,
 		    new_filesz);
 	} else {
@@ -342,7 +365,7 @@ muxfs_lfile_ancestors_recompute(uint8_t *root_sum, int lfile_fd,
 {
 	int rc, fd;
 	size_t chksz, lfilesz;
-	uint64_t blk_count, root_level, l, li, ln, pli, pln, pi, i;
+	uint64_t blk_count, root_level, l, li, ln, pli, pln, pi, i, j;
 	uint8_t *lfile;
 	struct muxfs_chk chk;
 
@@ -369,8 +392,7 @@ muxfs_lfile_ancestors_recompute(uint8_t *root_sum, int lfile_fd,
 
 	for (l = 0; l < root_level; ++l) {
 		/* Align ibegin. */
-		if (ibegin % 2)
-			--ibegin;
+		ibegin -= (ibegin % MUXFS_LEVEL_FACTOR);
 
 		if (muxfs_lfile_abs_range(&li, &ln, blk_count, l))
 			exit(-1); /* Programming error. */
@@ -381,19 +403,19 @@ muxfs_lfile_ancestors_recompute(uint8_t *root_sum, int lfile_fd,
 		if (iend > ln)
 			exit(-1); /* Programming error. */
 		
-		for (i = ibegin; i < iend; i += 2) {
+		for (i = ibegin; i < iend; i += MUXFS_LEVEL_FACTOR) {
 			muxfs_chk_init(&chk, alg);
-			muxfs_chk_update(&chk, &lfile[chksz * (li + i)], chksz);
-			if (i + 1 < iend) {
-				muxfs_chk_update(&chk, &lfile[chksz * (li + i +
-				    1)], chksz);
-			}
-			pi = i / 2;
+			j = i + MUXFS_LEVEL_FACTOR;
+			if (j > iend)
+				j = iend;
+			muxfs_chk_update(&chk, &lfile[chksz * (li + i)],
+			    (j - i) * chksz);
+			pi = i / MUXFS_LEVEL_FACTOR;
 			muxfs_chk_final(&lfile[chksz * (pli + pi)], &chk);
 		}
 
-		ibegin /= 2;
-		iend = ((iend + 1) / 2);
+		ibegin /= MUXFS_LEVEL_FACTOR;
+		iend = (iend + (MUXFS_LEVEL_FACTOR - 1)) / MUXFS_LEVEL_FACTOR;
 	}
 
 	if (root_sum != NULL) {
@@ -429,7 +451,7 @@ muxfs_lfile_readback(uint8_t *root_sum, dind dev_index, const char *path,
 	int fd, lfd;
 	size_t filesz, lfilesz;
 	uint8_t *lfile;
-	uint64_t blk_count, root_level, l, li, ln, pli, pln, pi, i, ibegin,
+	uint64_t blk_count, root_level, l, li, ln, pli, pln, pi, i, j, ibegin,
 	    iend;
 	uint8_t buf[MUXFS_BLOCK_SIZE], sum[MUXFS_CHKSZ_MAX];
 	size_t i_offset, rdsz;
@@ -464,8 +486,7 @@ muxfs_lfile_readback(uint8_t *root_sum, dind dev_index, const char *path,
 
 	if ((ibegin + 1) > iend)
 		exit(-1); /* Programming error. */
-	if ((ibegin % 2) != 0)
-		--ibegin;
+	ibegin -= (ibegin % MUXFS_LEVEL_FACTOR);
 
 	if ((fd = openat(dev->root_fd, path, O_RDONLY)) == -1)
 		goto out;
@@ -493,8 +514,7 @@ muxfs_lfile_readback(uint8_t *root_sum, dind dev_index, const char *path,
 	}
 	for (l = 0; l < root_level; ++l) {
 		/* Align ibegin. */
-		if (ibegin % 2)
-			--ibegin;
+		ibegin -= (ibegin % MUXFS_LEVEL_FACTOR);
 
 		if (muxfs_lfile_abs_range(&li, &ln, blk_count, l))
 			exit(-1); /* Programming error. */
@@ -505,21 +525,21 @@ muxfs_lfile_readback(uint8_t *root_sum, dind dev_index, const char *path,
 		if (iend > ln)
 			exit(-1); /* Programming error. */
 		
-		for (i = ibegin; i < iend; i += 2) {
+		for (i = ibegin; i < iend; i += MUXFS_LEVEL_FACTOR) {
 			muxfs_chk_init(&chk, alg);
-			muxfs_chk_update(&chk, &lfile[chksz * (li + i)], chksz);
-			if (i + 1 < iend) {
-				muxfs_chk_update(&chk, &lfile[chksz * (li + i +
-				    1)], chksz);
-			}
-			pi = i / 2;
+			j = i + MUXFS_LEVEL_FACTOR;
+			if (j > iend)
+				j = iend;
+			muxfs_chk_update(&chk, &lfile[chksz * (li + i)],
+			    (j - i) * chksz);
+			pi = i / MUXFS_LEVEL_FACTOR;
 			muxfs_chk_final(sum, &chk);
 			if (bcmp(sum, &lfile[chksz * (pli + pi)], chksz) != 0)
 				goto out;
 		}
 
-		ibegin /= 2;
-		iend = ((iend + 1) / 2);
+		ibegin /= MUXFS_LEVEL_FACTOR;
+		iend = (iend + (MUXFS_LEVEL_FACTOR - 1)) / MUXFS_LEVEL_FACTOR;
 	}
 
 	if ((expected != NULL) && (bcmp(expected, &lfile[chksz * pli], chksz)

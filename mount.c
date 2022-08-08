@@ -50,7 +50,7 @@ muxfs_mount_main(int argc, char *argv[])
 	case 1:
 		exit(-1); /* Error. */
 	case 2:
-		exit(1); /* Mismatch. */
+		exit(1); /* Mismatch.  Error message already printed. */
 	default:
 		exit(-1); /* Programming error. */
 	}

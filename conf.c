@@ -179,6 +179,8 @@ muxfs_conf_check(struct muxfs_dev_conf *conf,
 
 	if (conf->version.number != muxfs_program_version.number)
 		return 1;
+	if (conf->version.revision != muxfs_program_version.revision)
+		return 1;
 
 	return 0;
 }
